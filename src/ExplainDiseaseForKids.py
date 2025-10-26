@@ -43,7 +43,7 @@ class GenerateAnswer(dspy.Module):
             - Spider_mites_two_spotted_spider_mite: 점박이응애로 인한 피해, 점박이응애가 잎의 즙을 빨아 먹었을 때 발생, 물, 진공청소기 등으로 제거, 습도를 높여 번식을 억제해야 함
             - Yellowleaf_curl_virus: 바이러스를 가지고 있는 담배가루이가 토마토에 접촉한 경우 발병, 방충망 등을 이용해 해충의 침입을 막아야 함
         """
-        prediction = self.answerer(image=disease, 
+        prediction = self.answerer(disease=disease, 
                                    temperature=temperature, 
                                    humidity=humidity, 
                                    disease_info=disease_info)
