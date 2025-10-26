@@ -1,10 +1,5 @@
 """ 단순 GPT4o 식물인지 아닌지 True/False 반환 """
 
-""" PlantDetector.py
-GPT-4o 멀티모달 모델을 이용해
-사진에 식물(잎/줄기)이 있는지(True) 없는지(False) 판별합니다.
-"""
-
 import os
 import json
 import base64
