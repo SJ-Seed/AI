@@ -26,11 +26,28 @@ def main(image_path, temperature, humidity):
     disease = analyze_disease(image_path)
     # 만약 건강하다면 Healthy 반환
     if disease == "Healthy":
-        return disease
+        return "정상"
     
 
     """ 3. 질병 설명 제공 """
     explained, cause, cure = explain(disease, temperature, humidity)
+    # 질병 이름 한국어로 변환
+    if disease == "Bacterial_spot":
+        disease = "세균성 점무늬병"
+    elif disease == "Early_blight":
+        disease = "반점병"
+    elif disease == "Late_blight":
+        disease = "잎마름병"
+    elif disease == "Leaf_mold":
+        disease = "잎곰팡이병"
+    elif disease == "Mosaic_virus":
+        disease = "모자이크병"
+    elif disease == "Septoria_leaf_spot":
+        disease = "흰별무늬병"
+    elif disease == "Spider_mites_two_spotted_spider_mite":
+        disease = "점박이응애로 인한 피해"
+    elif disease == "Yellowleaf_curl_virus":
+        disease = "황화잎말림 바이러스"
     return disease, explained, cause, cure
 
 
@@ -40,6 +57,7 @@ if __name__ == "__main__":
     humidity = "최근 1주일 평균 습도 85% 이상"
 
     disease, explained, cause, cure = main(image_path, temperature, humidity)
+
     print("disease: ", disease)
     print("explained: ", explained)
     print("cause: ", cause)
