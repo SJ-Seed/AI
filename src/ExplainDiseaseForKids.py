@@ -19,9 +19,9 @@ class ExplainSignature(dspy.Signature):
     temperature: str = dspy.InputField(desc="해당 토마토의 일주일 간 온도 변화")
     humidity: str = dspy.InputField(desc="해당 토마토의 일주일 간 습도 변화")
     disease_info: str = dspy.InputField(desc="토마토 각 질병 별 설명")
-    explain: str = dspy.OutputField(desc="어린이가 이해하기 쉬운 형태로 질병에 대한 설명")
-    cause: str = dspy.OutputField(desc="어린이가 이해하기 쉬운 형태로 질병의 원인을 작성 (온습도 변화와 관련이 있다면 언급)")
-    cure: str = dspy.OutputField(desc="어린이가 이해하기 쉬운 형태로 질병의 치료 방법을 작성")
+    explain: str = dspy.OutputField(desc="어린이가 이해하기 쉬운 형태로 질병에 대한 설명(병 이름은 제외)")
+    cause: str = dspy.OutputField(desc="어린이가 이해하기 쉬운 형태로 질병의 원인을 작성 (온습도 변화와 관련이 있다면 언급)(병 이름은 제외)")
+    cure: str = dspy.OutputField(desc="어린이가 이해하기 쉬운 형태로 질병의 치료 방법을 작성(병 이름은 제외)")
 
 
 """ #2. 응답 생성을 위한 과정 및 방법 정의(Module) """
