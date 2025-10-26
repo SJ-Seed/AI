@@ -76,6 +76,7 @@ compiled_program = teleprompter.compile(
     GenerateAnswer(),
     trainset=trainset,
 )
+compiled_program.save("./compiled_leaf_disease", save_program=True)
 
 
 """ #4. Evaluation """

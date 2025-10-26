@@ -3,3 +3,4 @@ data
 config.json
 src/__pycache__
 src/dspy_example.py
+compiled_leaf_disease
