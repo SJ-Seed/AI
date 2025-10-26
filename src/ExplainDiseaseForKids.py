@@ -69,3 +69,12 @@ if __name__ == "__main__":
     print("설명:", result.explain)
     print("원인:", result.cause)
     print("치료:", result.cure)
+
+
+def explain(disease, temperature, humidity):
+    result = predictor(
+        disease=disease,
+        temperature=temperature,
+        humidity=humidity
+    )
+    return result.explain, result.cause, result.cure
