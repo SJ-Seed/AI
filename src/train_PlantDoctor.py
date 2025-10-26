@@ -22,7 +22,7 @@ class DiseaseSignature(dspy.Signature):
     disease_info: str = dspy.InputField(desc="토마토 각 질병 별 설명 (시각적 특징)")
     answer: str = dspy.OutputField(desc="정답 레이블. "
         "Bacterial_spot, Early_blight, Healthy, Late_blight, "
-        "Leaf_mold, Mosiac_virus, Septoria_leaf_spot, "
+        "Leaf_mold, Mosaic_virus, Septoria_leaf_spot, "
         "Spider_mites_two_spotted_spider_mite, Yellowleaf_curl_virus "
         "중에 그대로 작성.")
 
@@ -42,7 +42,7 @@ class GenerateAnswer(dspy.Module):
             3. Healthy: 병반이 없음, 녹색 균일.
             4. Late_blight: 잎이 어둡게 혹은 노랗게 시들거나 흰 곰팡이층이 생김, 시들어보임.
             5. Leaf_mold: 잎에 노란색/갈색 곰팡이층(여러 개의 반점).
-            6. Mosiac_virus: 잎이 얼룩덜룩한(노랑/초록) 무늬, 색이 불균형, 쭈글쭈글.
+            6. Mosaic_virus: 잎이 얼룩덜룩한(노랑/초록) 무늬, 색이 불균형, 쭈글쭈글.
             7. Septoria_leaf_spot: 중앙이 흰색인 가장자리 검은 점 여러 개, 점의 크기는 작은 편.
             8. Spider_mites_two_spotted_spider_mite: 매우 작고 미세한 하얀 점들 존재.
             9. Yellowleaf_curl_virus: 잎의 가장자리가 말리고 노랗게 변함.
