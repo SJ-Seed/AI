@@ -18,15 +18,15 @@ def main(image_path, temperature, humidity):
         if is_plant in ["True", "False"]:
             break
         time.sleep(1.5)
-    if not is_plant:    # 식물 사진이 아닌 경우 멈춤
-        return None
+    if is_plant == "False":    # 식물 사진이 아닌 경우 멈춤
+        return "식물아님", None, None, None
     
 
     """ 2. 입력된 사진의 질병을 판별 """
     disease = analyze_disease(image_path)
     # 만약 건강하다면 Healthy 반환
     if disease == "Healthy":
-        return "정상"
+        return "정상", None, None, None
     
 
     """ 3. 질병 설명 제공 """
@@ -52,7 +52,8 @@ def main(image_path, temperature, humidity):
 
 
 if __name__ == "__main__":
-    image_path = "./data/Leaf_mold/16.jpeg"
+    # image_path = "./data/Leaf_mold/16.jpeg"
+    image_path = "./data/No_tomato/2.jpg"
     temperature = "최근 1주일 평균 28도, 최고 32도, 최저 25도"
     humidity = "최근 1주일 평균 습도 85% 이상"
 

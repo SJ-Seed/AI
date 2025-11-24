@@ -39,16 +39,17 @@ async def analyze_endpoint(body: AnalyzeRequest):
 
     # main() 실행
     result = main(local_image_path, temperature, humidity)
+    disease, explained, cause, cure = result
 
     # 결과 해석 및 반환
-    if not result:
+    if disease == "식물아님":
         return JSONResponse(content={
             "photo": False,
             "state": None,
             "message": "식물이 잘 보이지 않아요. 다시 촬영해주세요!"
         })
 
-    elif isinstance(result, str) and result == "Healthy":
+    elif disease == "정상":
         return JSONResponse(content={
             "photo": True,
             "state": "정상",
@@ -56,7 +57,6 @@ async def analyze_endpoint(body: AnalyzeRequest):
         })
 
     else:
-        disease, explained, cause, cure = result
         return JSONResponse(content={
             "photo": True,
             "state": disease,
@@ -69,4 +69,4 @@ async def analyze_endpoint(body: AnalyzeRequest):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=8000, log_level="debug")
