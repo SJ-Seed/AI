@@ -39,13 +39,6 @@
 
 ## 🛠 기술 스택 (Tech Stack)
 
-| Category | Technologies |
-| --- | --- |
-| **Mobile (iOS)** | ![Swift](https://img.shields.io/badge/Swift-5.9-F05138?logo=swift) ![SwiftUI](https://img.shields.io/badge/SwiftUI-MVVM-blue) ![Xcode](https://img.shields.io/badge/Xcode-15.0+-147EFB?logo=xcode) |
-| **Hardware (IoT)** | ![Arduino](https://img.shields.io/badge/Arduino-UNO-00979D?logo=arduino) (Temp/Hum/Soil Sensors) |
-| **Network** | `URLSession`, `REST API` |
-| **Concurrency** | `Swift Concurrency (async/await)`, `Combine` |
-| **Collaboration** | ![Git](https://img.shields.io/badge/Git-F05032?logo=git) ![GitHub](https://img.shields.io/badge/GitHub-181717?logo=github) |
 
 <br/>
 
