@@ -2,6 +2,13 @@
 모델 학습 및 컴파일
 """
 
+import sys
+from pathlib import Path
+
+if __package__ is None or __package__ == "":
+    project_root = Path(__file__).resolve().parents[1]
+    sys.path.insert(0, str(project_root))
+    
 import dspy
 from app.core.config import load_settings
 from dspy.teleprompt import MIPROv2
