@@ -1,6 +1,8 @@
 venv
 data
 config.json
-src/__pycache__
+__pycache__/
 src/dspy_example.py
 compiled_leaf_disease
+.env
+.dspy_cache/

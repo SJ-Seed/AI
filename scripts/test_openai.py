@@ -1,12 +1,9 @@
 """ API 연결 테스트 전용 파일 """
-import json
+import os
 import openai
 
-# config.json에서 API 키 불러오기
-with open("config.json", "r", encoding="utf-8") as f:
-    config = json.load(f)
-
-api_key = config["OPENAI_API_KEY"]
+# 환경변수에서 API 키 불러오기
+api_key = os.environ["OPENAI_API_KEY"]
 client = openai.OpenAI(api_key=api_key)
 
 # 연결 테스트

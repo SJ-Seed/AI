@@ -1,20 +1,14 @@
+"""
+DSPy를 이용하여 질병 설명, 원인, 치료 방법을 생성하는 구현체이다.
+"""
+
 import dspy
-import os
-import json
-
-""" #0. DSPy 초기 설정 """
-CONFIG_PATH = os.path.join(os.path.dirname(__file__), "../config.json")
-with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-    cfg = json.load(f)
-api_key = cfg["OPENAI_API_KEY"]
-model = dspy.LM(model="gpt-4o", api_key=api_key, temperature=0.5)
-dspy.settings.configure(lm=model)
 
 
-""" #1. 입출력 정의(Signature) """
+"""
+질병 설명 생성을 위한 DSPy 입출력 스키마
+"""
 class ExplainSignature(dspy.Signature):
-
-    # 주어진 사진과 질병 정보를 보고 최종 질병 라벨 반환
     disease: str = dspy.InputField(desc="토마토 질병 이름")
     temperature: str = dspy.InputField(desc="해당 토마토의 일주일 간 온도 변화")
     humidity: str = dspy.InputField(desc="해당 토마토의 일주일 간 습도 변화")
@@ -24,13 +18,19 @@ class ExplainSignature(dspy.Signature):
     cure: str = dspy.OutputField(desc="어린이가 이해하기 쉬운 형태로 질병의 치료 방법을 작성(병 이름은 제외)")
 
 
-""" #2. 응답 생성을 위한 과정 및 방법 정의(Module) """
+"""
+질병 정보와 환경 정보를 바탕으로 설명을 생성하는 DSPy 모듈
+"""
 class GenerateAnswer(dspy.Module):
     def __init__(self):
         super().__init__()
         self.answerer = dspy.Predict(ExplainSignature)
-    
+
+    """
+    질병 설명, 원인, 치료 방법을 생성한다.
+    """
     def forward(self, disease, temperature, humidity):
+        # 질병 별 설명 및 대응 방법을 LLM에게 함께 제공한다.
         disease_info = """
             토마토 질병에 대한 설명을 보고, 주어진 토마토 질병 이름과 일치하는 설명, 원인, 치료 방법을 파악하세요.
             
@@ -43,38 +43,32 @@ class GenerateAnswer(dspy.Module):
             - Spider_mites_two_spotted_spider_mite: 점박이응애로 인한 피해, 점박이응애가 잎의 즙을 빨아 먹었을 때 발생, 물, 진공청소기 등으로 제거, 습도를 높여 번식을 억제해야 함
             - Yellowleaf_curl_virus: 바이러스를 가지고 있는 담배가루이가 토마토에 접촉한 경우 발병, 방충망 등을 이용해 해충의 침입을 막아야 함
         """
-        prediction = self.answerer(disease=disease, 
-                                   temperature=temperature, 
-                                   humidity=humidity, 
-                                   disease_info=disease_info)
-        return dspy.Prediction(explain=prediction.explain, cause=prediction.cause, cure=prediction.cure)
-    
-predictor = GenerateAnswer()
+        prediction = self.answerer(
+            disease=disease,
+            temperature=temperature,
+            humidity=humidity,
+            disease_info=disease_info,
+        )
+        return dspy.Prediction(
+            explain=prediction.explain,
+            cause=prediction.cause,
+            cure=prediction.cure,
+        )
 
 
-""" 예시 테스트 """
-if __name__ == "__main__":
-    disease = "Leaf_mold"
-    temperature = "최근 1주일 평균 28도, 최고 32도, 최저 25도"
-    humidity = "최근 1주일 평균 습도 85% 이상"
+"""
+DiseaseExplainer 인터페이스의 DSPy 구현체
+"""
+class DspyDiseaseExplainer:
+    def __init__(self, predictor, lm) -> None:
+        self.predictor = predictor
+        self.lm = lm
 
-    # Predictor 실행
-    result = predictor(
-        disease=disease,
-        temperature=temperature,
-        humidity=humidity
-    )
-
-    # 결과 출력
-    print("설명:", result.explain)
-    print("원인:", result.cause)
-    print("치료:", result.cure)
-
-
-def explain(disease, temperature, humidity):
-    result = predictor(
-        disease=disease,
-        temperature=temperature,
-        humidity=humidity
-    )
-    return result.explain, result.cause, result.cure
+    def explain(self, disease, temperature, humidity):
+        with dspy.context(lm=self.lm):
+            result = self.predictor(
+                disease=disease,
+                temperature=temperature,
+                humidity=humidity,
+            )
+        return result.explain, result.cause, result.cure

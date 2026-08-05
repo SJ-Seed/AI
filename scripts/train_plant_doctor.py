@@ -1,20 +1,27 @@
+"""
+모델 학습 및 컴파일
+"""
+
+import sys
+from pathlib import Path
+
+if __package__ is None or __package__ == "":
+    project_root = Path(__file__).resolve().parents[1]
+    sys.path.insert(0, str(project_root))
+    
 import dspy
-import os
-import json
+from app.core.config import load_settings
 from dspy.teleprompt import MIPROv2
 from dspy.evaluate import Evaluate
-from make_dataset import build_datasets
+from scripts.make_dataset import build_datasets
 
 """ #0. DSPy 초기 설정 """
-CONFIG_PATH = os.path.join(os.path.dirname(__file__), "../config.json")
-with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-    cfg = json.load(f)
-api_key = cfg["OPENAI_API_KEY"]
+api_key = load_settings().openai_api_key
 model = dspy.LM(model="gpt-4o", api_key=api_key, temperature=0)
 dspy.settings.configure(lm=model)
 
 
-""" #1. 입출력 정의(Signature) """
+""" #1. 입출력 정의 """
 class DiseaseSignature(dspy.Signature):
 
     # 주어진 사진과 질병 정보를 보고 최종 질병 라벨 반환
@@ -27,7 +34,7 @@ class DiseaseSignature(dspy.Signature):
         "중에 그대로 작성.")
 
 
-""" #2. 응답 생성을 위한 과정 및 방법 정의(Module) """
+""" #2. 응답 생성을 위한 과정 및 방법 정의 """
 class GenerateAnswer(dspy.Module):
     def __init__(self):
         super().__init__()
@@ -54,7 +61,7 @@ class GenerateAnswer(dspy.Module):
 predictor = GenerateAnswer()
 
 
-""" #3. 프롬프트 최적화(Optimizer) """
+""" #3. 프롬프트 최적화 """
 trainset, devset = build_datasets()
 
 # 성능 평가 metric 정의 (간단한 문자열 비교)
