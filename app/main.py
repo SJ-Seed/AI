@@ -34,7 +34,14 @@ async def lifespan(app: FastAPI):
     # OpenAI API 클라이언트 생성
     openai_client = OpenAI(api_key=settings.openai_api_key)
 
-    # 질병 설명 생성에 사용할 DSPy 언어 모델 생성
+    # 질병 분류에 사용할 DSPy 언어 모델 생성 (결과 일관성을 위해 temperature=0.0)
+    classifier_lm = dspy.LM(
+        model="gpt-4o",
+        api_key=settings.openai_api_key,
+        temperature=0.0,
+    )
+
+    # 질병 설명 생성에 사용할 DSPy 언어 모델 생성 (자연스러운 설명 생성을 위해 temperature=0.5)
     explainer_lm = dspy.LM(
         model="gpt-4o",
         api_key=settings.openai_api_key,
@@ -47,7 +54,7 @@ async def lifespan(app: FastAPI):
     # 애플리케이션 전역에서 사용할 서비스 생성
     app.state.diagnosis_service = DiagnosisService(
         detector=OpenAIPlantDetector(openai_client),
-        classifier=DspyDiseaseClassifier(compiled_program, explainer_lm),
+        classifier=DspyDiseaseClassifier(compiled_program, classifier_lm),
         explainer=DspyDiseaseExplainer(GenerateAnswer(), explainer_lm),
     )
 
