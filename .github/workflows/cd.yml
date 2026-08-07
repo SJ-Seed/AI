@@ -71,13 +71,14 @@ jobs:
     steps:
       - name: Configure SSH
         env:
-          EC2_HOST: ${{ secrets.EC2_HOST }}
           EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+          EC2_KNOWN_HOSTS: ${{ secrets.EC2_KNOWN_HOSTS }}
         run: |
           mkdir -p ~/.ssh
           printf '%s' "$EC2_SSH_KEY" > ~/.ssh/ec2-key.pem
           chmod 600 ~/.ssh/ec2-key.pem
           printf '%s\n' "$EC2_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
 
       - name: Deploy to EC2
         env:
