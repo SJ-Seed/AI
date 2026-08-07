@@ -12,6 +12,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from app.api.routes.analysis import router as analysis_router
+from app.api.routes.health import router as health_router
 from app.core.config import load_settings
 
 """
@@ -69,6 +70,7 @@ def create_app() -> FastAPI:
     application = FastAPI(lifespan=lifespan)
     # 분석 API 등록
     application.include_router(analysis_router)
+    application.include_router(health_router)
     return application
 
 # 애플리케이션 생성
