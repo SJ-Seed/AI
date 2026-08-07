@@ -106,6 +106,8 @@ docker build -t sjseed-ai .
 docker run --rm --env-file .env -p 8000:8000 sjseed-ai
 ```
 
+<br/>
+
 ## ☁️ Cloud Infrastructure & Deployment
 
 AWS와 GitHub Actions를 기반으로 Docker 이미지 빌드부터 EC2 배포까지 자동화된 배포 환경을 구성했습니다.
