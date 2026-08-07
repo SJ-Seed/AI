@@ -105,3 +105,86 @@ Docker Compose 없이 실행하려면 다음 명령을 사용합니다.
 docker build -t sjseed-ai .
 docker run --rm --env-file .env -p 8000:8000 sjseed-ai
 ```
+
+## ☁️ Cloud Infrastructure & Deployment
+
+AWS와 GitHub Actions를 기반으로 Docker 이미지 빌드부터 EC2 배포까지 자동화된 배포 환경을 구성했습니다.
+
+### Architecture
+
+- **Amazon EC2**
+  - Ubuntu 기반 애플리케이션 서버
+  - Docker / Docker Compose를 이용한 컨테이너 실행
+  - Elastic IP를 이용한 고정 IP 구성
+
+- **Amazon S3**
+  - 학습된 DSPy 모델(`compiled_leaf_disease`) 저장
+  - Git에 포함하지 않는 모델 아티팩트 관리
+
+- **AWS IAM**
+  - GitHub Actions OIDC 인증을 통한 S3 접근 권한 관리
+  - 장기 AWS Access Key 없이 모델 다운로드
+
+- **GitHub Container Registry (GHCR)**
+  - 빌드된 FastAPI Docker 이미지 저장
+  - `latest` 및 Commit SHA 기반 이미지 태그 관리
+
+- **GitHub Actions**
+  - `main` 브랜치 반영 시 CD Workflow 실행
+  - S3에서 모델 다운로드
+  - Docker 이미지 빌드 및 GHCR Push
+  - EC2에 배포 후 Health Check 수행
+
+### Deployment Architecture
+
+```text
+                  Amazon S3
+          compiled_leaf_disease
+                       │
+                       │ OIDC / IAM
+                       ▼
+                GitHub Actions
+                       │
+              Docker Image Build
+                       │
+                       ▼
+                     GHCR
+                       │
+                 Docker Pull
+                       │
+                       ▼
++--------------------------------------------------+
+|                  Amazon EC2                      |
+|--------------------------------------------------|
+| Ubuntu                                           |
+| Docker / Docker Compose                          |
+| FastAPI Container                                |
++--------------------------------------------------+
+                       │
+                       ▼
+                 GET /health
+```
+
+### Deployment Flow
+
+`main` 브랜치에 변경사항이 반영되면 다음 과정으로 자동 배포됩니다.
+
+```text
+main Push / Merge
+        ↓
+S3 모델 다운로드
+        ↓
+Docker 이미지 빌드
+        ↓
+GHCR Push
+        ↓
+EC2 SSH 접속
+        ↓
+최신 이미지 Pull
+        ↓
+Docker Compose 재배포
+        ↓
+Health Check
+```
+
+배포된 애플리케이션의 상태는 `/health` 엔드포인트를 통해 확인합니다.

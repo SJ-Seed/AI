@@ -1,0 +1,124 @@
+name: CD
+
+on:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: cd-main
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: sj-seed/ai
+  AWS_REGION: ap-northeast-2
+  S3_BUCKET: sjseed-models-585443427319-ap-northeast-2-an
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # GitHub Actions가 AWS에 접근하기 위한 인증
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # Git에는 없는 학습 모델을 S3에서 다운로드
+      - name: Download model from S3
+        run: |
+          aws s3 cp \
+            s3://${{ env.S3_BUCKET }}/compiled_leaf_disease/ \
+            compiled_leaf_disease/ \
+            --recursive
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Configure SSH
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s' "$EC2_SSH_KEY" > ~/.ssh/ec2-key.pem
+          chmod 600 ~/.ssh/ec2-key.pem
+          printf '%s\n' "$EC2_KNOWN_HOSTS" > ~/.ssh/known_hosts
+
+      - name: Deploy to EC2
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          printf '%s' "$GHCR_TOKEN" | \
+            ssh -i ~/.ssh/ec2-key.pem "$EC2_USER@$EC2_HOST" \
+            "docker login ghcr.io -u '$GHCR_USER' --password-stdin"
+
+          ssh -i ~/.ssh/ec2-key.pem "$EC2_USER@$EC2_HOST" << 'EOF'
+            set -e
+
+            cd ~/opt/AI
+
+            git pull --ff-only origin main
+
+            docker compose pull ai
+            docker compose up -d --no-build ai
+
+            health_check_succeeded=false
+
+            for i in $(seq 1 24); do
+              if curl -fsS http://localhost:8000/health; then
+                echo ""
+                echo "Health check succeeded"
+                health_check_succeeded=true
+                break
+              fi
+
+              echo "Waiting for application... ($i/24)"
+              sleep 5
+            done
+
+            if [ "$health_check_succeeded" != "true" ]; then
+              echo "Health check failed"
+              docker compose logs --tail 100 ai
+              exit 1
+            fi
+
+            echo "Deployment succeeded"
+          EOF
