@@ -1,0 +1,44 @@
+# Git
+.git
+.github
+
+# Python virtual environment
+venv/
+.venv/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Test / coverage cache
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Tool caches
+.dspy_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+
+# Local environment / config
+.env
+config.json
+
+# IDE
+.vscode/
+.idea/
+
+# Development-only files
+tests/
+scripts/
+README.md
+
+# Training data
+data/
+
+# Build artifacts / logs
+build/
+dist/
+*.log

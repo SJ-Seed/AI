@@ -1,0 +1,12 @@
+services:
+  ai:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: sjseed-ai:latest
+    env_file:
+      - .env
+    ports:
+      - "8000:8000"
+    init: true
+    restart: unless-stopped
