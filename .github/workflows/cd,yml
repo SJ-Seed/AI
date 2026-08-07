@@ -77,7 +77,7 @@ jobs:
           mkdir -p ~/.ssh
           printf '%s' "$EC2_SSH_KEY" > ~/.ssh/ec2-key.pem
           chmod 600 ~/.ssh/ec2-key.pem
-          ssh-keyscan -H "$EC2_HOST" >> ~/.ssh/known_hosts
+          printf '%s\n' "$EC2_KNOWN_HOSTS" > ~/.ssh/known_hosts
 
       - name: Deploy to EC2
         env:
