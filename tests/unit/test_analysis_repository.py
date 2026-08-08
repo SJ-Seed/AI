@@ -112,22 +112,22 @@ class AnalysisRepositoryTest(unittest.TestCase):
         self.assertEqual(analysis.completed_at.tzinfo, timezone.utc)
         self.session.commit.assert_awaited_once_with()
 
-    def test_mark_failed_records_error_and_job_retry_count(self):
+    def test_mark_failed_records_error_without_changing_job_retry_count(self):
         analysis = self._analysis()
+        analysis.retry_count = 3
         self.session.get.return_value = analysis
 
         result = asyncio.run(self.repository.mark_failed(
             1,
             error_code="MODEL_ERROR",
             error_message="classification failed",
-            retry_count=2,
         ))
 
         self.assertTrue(result)
         self.assertEqual(analysis.status, AnalysisStatus.FAILED)
         self.assertEqual(analysis.error_code, "MODEL_ERROR")
         self.assertEqual(analysis.error_message, "classification failed")
-        self.assertEqual(analysis.retry_count, 2)
+        self.assertEqual(analysis.retry_count, 3)
         self.assertEqual(analysis.completed_at.tzinfo, timezone.utc)
         self.session.commit.assert_awaited_once_with()
 

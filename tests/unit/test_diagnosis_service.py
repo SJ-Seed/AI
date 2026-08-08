@@ -34,6 +34,34 @@ class FakeExplainer:
 
 
 class DiagnosisServiceTest(unittest.TestCase):
+    def test_detailed_result_preserves_code_and_display_name(self):
+        service = DiagnosisService(
+            FakeDetector(["True"]),
+            FakeClassifier("Leaf_mold"),
+            FakeExplainer(),
+        )
+
+        result = service.diagnose_with_details("image", "28", "85")
+
+        self.assertTrue(result.is_plant)
+        self.assertEqual(result.disease_code, "Leaf_mold")
+        self.assertEqual(result.disease_name, "잎곰팡이병")
+        self.assertEqual((result.explain, result.cause, result.cure), ("설명", "원인", "치료"))
+
+    @patch("app.application.services.diagnosis_service.time.sleep")
+    def test_detailed_result_keeps_unknown_plant_state_after_detector_exhaustion(self, sleep):
+        service = DiagnosisService(
+            FakeDetector(["invalid"] * 5),
+            FakeClassifier("Leaf_mold"),
+            FakeExplainer(),
+        )
+
+        result = service.diagnose_with_details("image", "28", "85")
+
+        self.assertIsNone(result.is_plant)
+        self.assertEqual(result.disease_code, "Leaf_mold")
+        self.assertEqual(sleep.call_count, 5)
+
     def test_not_a_plant_preserves_result_and_short_circuits(self):
         detector = FakeDetector(["False"])
         classifier = FakeClassifier("Healthy")
