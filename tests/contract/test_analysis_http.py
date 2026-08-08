@@ -1,4 +1,5 @@
 import unittest
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, Mock, patch
 
 from fastapi.testclient import TestClient
@@ -10,6 +11,7 @@ from app.api.dependencies import (
     get_model_version,
 )
 from app.domain.models import DiagnosisOutcome
+from app.domain.enums import AnalysisStatus
 from app.main import create_app
 
 
@@ -21,6 +23,7 @@ class AnalysisHttpTest(unittest.TestCase):
         self.downloader.download.return_value = ("local.jpg", None)
         self.repository = Mock()
         self.repository.create = AsyncMock(return_value=11)
+        self.repository.get_by_id = AsyncMock()
         self.repository.mark_processing = AsyncMock(return_value=True)
         self.repository.mark_completed = AsyncMock(return_value=True)
         self.repository.mark_failed = AsyncMock(return_value=True)
@@ -203,6 +206,84 @@ class AnalysisHttpTest(unittest.TestCase):
             error_code="RuntimeError",
             error_message="service failure",
         )
+
+    def test_get_analysis_returns_every_lifecycle_status(self):
+        for status in AnalysisStatus:
+            with self.subTest(status=status):
+                snapshot = self._analysis_snapshot(status)
+                self.repository.get_by_id.return_value = snapshot
+
+                response = self.client.get("/analyses/11")
+
+                self.assertEqual(response.status_code, 200)
+                body = response.json()
+                self.assertEqual(body["id"], 11)
+                self.assertEqual(body["status"], status.value)
+                self.assertEqual(body["image_path"], self.valid_request["image_path"])
+                self.assertEqual(body["created_at"], "2026-08-08T01:00:00Z")
+                self.assertEqual(set(body), set(snapshot))
+                self.repository.get_by_id.assert_awaited_with(11)
+
+    def test_get_analysis_returns_completed_result(self):
+        snapshot = self._analysis_snapshot(AnalysisStatus.COMPLETED)
+        snapshot.update({
+            "is_plant": True,
+            "disease_code": "Leaf_mold",
+            "disease_name": "잎곰팡이병",
+            "explain": "설명",
+            "cause": "원인",
+            "cure": "치료",
+            "model_version": "classifier-v1",
+            "latency_ms": 1250,
+            "started_at": datetime(2026, 8, 8, 1, 0, 1, tzinfo=timezone.utc),
+            "completed_at": datetime(2026, 8, 8, 1, 0, 2, tzinfo=timezone.utc),
+        })
+        self.repository.get_by_id.return_value = snapshot
+
+        response = self.client.get("/analyses/11")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["disease_code"], "Leaf_mold")
+        self.assertEqual(response.json()["disease_name"], "잎곰팡이병")
+        self.assertEqual(response.json()["completed_at"], "2026-08-08T01:00:02Z")
+
+    def test_get_analysis_returns_not_found(self):
+        self.repository.get_by_id.return_value = None
+
+        response = self.client.get("/analyses/404")
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json(), {"detail": "Analysis not found"})
+        self.repository.get_by_id.assert_awaited_once_with(404)
+
+    def test_get_analysis_rejects_non_integer_id(self):
+        response = self.client.get("/analyses/not-an-integer")
+
+        self.assertEqual(response.status_code, 422)
+        self.repository.get_by_id.assert_not_awaited()
+
+    def _analysis_snapshot(self, status: AnalysisStatus) -> dict[str, object]:
+        return {
+            "id": 11,
+            "status": status,
+            "image_path": self.valid_request["image_path"],
+            "temperature": "28",
+            "humidity": "85",
+            "is_plant": None,
+            "disease_code": None,
+            "disease_name": None,
+            "explain": None,
+            "cause": None,
+            "cure": None,
+            "model_version": None,
+            "latency_ms": None,
+            "retry_count": 0,
+            "error_code": None,
+            "error_message": None,
+            "created_at": datetime(2026, 8, 8, 1, 0, tzinfo=timezone.utc),
+            "started_at": None,
+            "completed_at": None,
+        }
 
 
 if __name__ == "__main__":

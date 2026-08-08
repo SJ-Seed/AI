@@ -1,6 +1,6 @@
 from time import perf_counter
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
 
 from app.api.dependencies import (
@@ -9,7 +9,7 @@ from app.api.dependencies import (
     get_image_downloader,
     get_model_version,
 )
-from app.api.schemas import AnalyzeRequest
+from app.api.schemas import AnalysisResponse, AnalyzeRequest
 from app.application.ports.analysis_repository import AnalysisRepository
 from app.application.services.diagnosis_service import DiagnosisService
 from app.core.logging import get_logger
@@ -18,6 +18,18 @@ from app.infrastructure.image.image_downloader import ImageDownloader
 
 router = APIRouter()
 logger = get_logger(__name__)
+
+
+# 분석 ID로 저장된 분석 이력 조회
+@router.get("/analyses/{analysis_id}", response_model=AnalysisResponse)
+async def get_analysis_endpoint(
+    analysis_id: int,
+    repository: AnalysisRepository = Depends(get_analysis_repository),
+) -> dict[str, object]:
+    analysis = await repository.get_by_id(analysis_id)
+    if analysis is None:
+        raise HTTPException(status_code=404, detail="Analysis not found")
+    return analysis
 
 
 @router.post("/analyze")
