@@ -46,6 +46,33 @@
 
 ## 🛠 기술 스택 (Tech Stack)
 
+### Backend
+
+- Python 3.11
+- FastAPI
+- Pydantic
+- SQLAlchemy 2.x (Async)
+- Alembic
+
+### Database
+
+- PostgreSQL
+- asyncpg
+
+### AI
+
+- DSPy
+- OpenAI GPT-4o
+- Compiled DSPy Classifier
+
+### Infrastructure
+
+- Docker / Docker Compose
+- AWS EC2
+- Amazon S3
+- GitHub Container Registry (GHCR)
+- GitHub Actions
+
 <br/>
 
 ## 🎯 기대 효과 (Expected Effect)

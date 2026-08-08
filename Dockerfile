@@ -15,6 +15,8 @@ RUN addgroup --system app \
 
 COPY --chown=app:app app/ ./app/
 COPY --chown=app:app compiled_leaf_disease/ ./compiled_leaf_disease/
+COPY --chown=app:app alembic.ini ./
+COPY --chown=app:app alembic/ ./alembic/
 
 USER app
 

@@ -10,7 +10,7 @@ from pathlib import Path
 @dataclass(frozen=True)
 class Settings:
     openai_api_key: str
-    database_url: str | None
+    database_url: str
     redis_url: str | None
     model_path: Path
     model_version: str
@@ -24,9 +24,13 @@ def load_settings() -> Settings:
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY environment variable is required")
 
+    database_url = os.getenv("DATABASE_URL")
+    if not database_url:
+        raise RuntimeError("DATABASE_URL environment variable is required")
+
     return Settings(
         openai_api_key=api_key,
-        database_url=os.getenv("DATABASE_URL"),
+        database_url=database_url,
         redis_url=os.getenv("REDIS_URL"),
         model_path=Path(os.getenv("MODEL_PATH", "./compiled_leaf_disease")),
         model_version=os.getenv("MODEL_VERSION", ""),

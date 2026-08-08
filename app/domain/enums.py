@@ -2,6 +2,15 @@
 질병 이름 매핑
 """
 
+from enum import Enum
+
+
+class AnalysisStatus(str, Enum):
+    PENDING = "PENDING"
+    PROCESSING = "PROCESSING"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+
 DISEASE_NAMES_KO = {
     "Bacterial_spot": "세균성 점무늬병",
     "Early_blight": "반점병",
