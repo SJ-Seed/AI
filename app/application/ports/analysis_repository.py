@@ -33,7 +33,7 @@ class AnalysisRepository(Protocol):
         self,
         analysis_id: int,
         *,
-        is_plant: bool,
+        is_plant: bool | None,
         disease_code: str | None = None,
         disease_name: str | None = None,
         explain: str | None = None,
@@ -51,7 +51,5 @@ class AnalysisRepository(Protocol):
         *,
         error_code: str,
         error_message: str,
-        retry_count: int,
     ) -> bool:
         ...
-

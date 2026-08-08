@@ -59,7 +59,7 @@ class SqlAlchemyAnalysisRepository(AnalysisRepository):
         self,
         analysis_id: int,
         *,
-        is_plant: bool,
+        is_plant: bool | None,
         disease_code: str | None = None,
         disease_name: str | None = None,
         explain: str | None = None,
@@ -93,7 +93,6 @@ class SqlAlchemyAnalysisRepository(AnalysisRepository):
         *,
         error_code: str,
         error_message: str,
-        retry_count: int,
     ) -> bool:
         analysis = await self.session.get(Analysis, analysis_id)
         if analysis is None:
@@ -102,7 +101,6 @@ class SqlAlchemyAnalysisRepository(AnalysisRepository):
         analysis.status = AnalysisStatus.FAILED
         analysis.error_code = error_code
         analysis.error_message = error_message
-        analysis.retry_count = retry_count
         analysis.completed_at = datetime.now(timezone.utc)
         await self._commit()
         return True
@@ -139,4 +137,3 @@ class SqlAlchemyAnalysisRepository(AnalysisRepository):
             "started_at": analysis.started_at,
             "completed_at": analysis.completed_at,
         }
-

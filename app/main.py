@@ -59,8 +59,8 @@ async def lifespan(app: FastAPI):
         explainer=DspyDiseaseExplainer(GenerateAnswer(), explainer_lm),
     )
 
-    # 이미지 다운로드 유틸리티 등록
     app.state.image_downloader = ImageDownloader()
+    app.state.model_version = settings.model_version or None
     yield
 
 """
