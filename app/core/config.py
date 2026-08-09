@@ -12,6 +12,7 @@ class Settings:
     openai_api_key: str
     database_url: str
     redis_url: str | None
+    analysis_queue_name: str
     model_path: Path
     model_version: str
     openai_timeout_seconds: float
@@ -32,6 +33,7 @@ def load_settings() -> Settings:
         openai_api_key=api_key,
         database_url=database_url,
         redis_url=os.getenv("REDIS_URL"),
+        analysis_queue_name=os.getenv("ANALYSIS_QUEUE_NAME", "analysis"),
         model_path=Path(os.getenv("MODEL_PATH", "./compiled_leaf_disease")),
         model_version=os.getenv("MODEL_VERSION", ""),
         openai_timeout_seconds=float(os.getenv("OPENAI_TIMEOUT_SECONDS", "30")),
