@@ -18,6 +18,9 @@ class Settings:
     openai_timeout_seconds: float
     max_retry_count: int
     max_image_size_mb: int
+    retry_base_delay_seconds: float = 2
+    retry_max_delay_seconds: float = 60
+    image_download_timeout_seconds: float = 10
 
 
 def load_settings() -> Settings:
@@ -25,7 +28,7 @@ def load_settings() -> Settings:
     if not database_url:
         raise RuntimeError("DATABASE_URL environment variable is required")
 
-    return Settings(
+    settings = Settings(
         openai_api_key=os.getenv("OPENAI_API_KEY"),
         database_url=database_url,
         redis_url=os.getenv("REDIS_URL"),
@@ -33,9 +36,23 @@ def load_settings() -> Settings:
         model_path=Path(os.getenv("MODEL_PATH", "./compiled_leaf_disease")),
         model_version=os.getenv("MODEL_VERSION", ""),
         openai_timeout_seconds=float(os.getenv("OPENAI_TIMEOUT_SECONDS", "30")),
-        max_retry_count=int(os.getenv("MAX_RETRY_COUNT", "5")),
+        max_retry_count=int(os.getenv("MAX_RETRY_COUNT", "4")),
         max_image_size_mb=int(os.getenv("MAX_IMAGE_SIZE_MB", "10")),
+        retry_base_delay_seconds=float(os.getenv("RETRY_BASE_DELAY_SECONDS", "2")),
+        retry_max_delay_seconds=float(os.getenv("RETRY_MAX_DELAY_SECONDS", "60")),
+        image_download_timeout_seconds=float(os.getenv("IMAGE_DOWNLOAD_TIMEOUT_SECONDS", "10")),
     )
+    if settings.max_retry_count < 0:
+        raise RuntimeError("MAX_RETRY_COUNT must be non-negative")
+    if settings.max_image_size_mb <= 0:
+        raise RuntimeError("MAX_IMAGE_SIZE_MB must be positive")
+    if settings.retry_base_delay_seconds < 0:
+        raise RuntimeError("RETRY_BASE_DELAY_SECONDS must be non-negative")
+    if settings.retry_max_delay_seconds < settings.retry_base_delay_seconds:
+        raise RuntimeError("RETRY_MAX_DELAY_SECONDS must be >= RETRY_BASE_DELAY_SECONDS")
+    if settings.image_download_timeout_seconds <= 0:
+        raise RuntimeError("IMAGE_DOWNLOAD_TIMEOUT_SECONDS must be positive")
+    return settings
 
 
 def require_redis_url(settings: Settings) -> str:

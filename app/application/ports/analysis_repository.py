@@ -33,6 +33,13 @@ class AnalysisRepository(Protocol):
         """Atomically change a pending analysis to processing."""
         ...
 
+    # 일시적 오류가 발생한 분석 작업을 재시도 대기 상태로 변경
+    async def reschedule_for_retry(
+        self, analysis_id: int, *, max_retry_count: int
+    ) -> int | None:
+        """Return the incremented retry count after PROCESSING -> PENDING."""
+        ...
+
     # 분석이 정상적으로 끝났을 떄 결과를 저장하고 COMPLETED 상태로 변경
     async def mark_completed(
         self,

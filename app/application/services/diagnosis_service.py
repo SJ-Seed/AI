@@ -8,6 +8,7 @@ from app.application.ports.classifier import DiseaseClassifier
 from app.application.ports.detector import PlantDetector
 from app.application.ports.explainer import DiseaseExplainer
 from app.domain.enums import DISEASE_NAMES_KO
+from app.domain.exceptions import InvalidDiagnosisResponse
 from app.domain.models import DiagnosisOutcome, DiagnosisResult
 
 
@@ -39,17 +40,9 @@ class DiagnosisService:
         temperature: str,
         humidity: str,
     ) -> DiagnosisOutcome:
-        is_plant_result: bool | None = None
-
-        # OpenAI를 통해 식물 여부 판별 (유효한 응답이 없으면 최대 5회 시도)
-        for _ in range(0, 5):
-            is_plant = self.detector.analyze_image(image_path)
-            if is_plant in ["True", "False"]:
-                is_plant_result = is_plant == "True"
-                break
-            time.sleep(1.5)
-
-        # 식물이 아닌 경우 질병 분석 없이 종료
+        is_plant = self.detector.analyze_image(image_path)
+        if is_plant not in ("True", "False"):
+            raise InvalidDiagnosisResponse("Plant detector returned an invalid response")
         if is_plant == "False":
             return DiagnosisOutcome(False, None, None, None, None, None)
 
@@ -59,6 +52,8 @@ class DiagnosisService:
         # 정상 식물인 경우 추가 설명 생성 없이 종료
         if disease_code == "Healthy":
             return DiagnosisOutcome(True, "Healthy", "정상", None, None, None)
+        if disease_code not in DISEASE_NAMES_KO:
+            raise InvalidDiagnosisResponse("Disease classifier returned an invalid response")
 
         # 질병인 경우 설명, 원인, 치료 방법 생성
         explained, cause, cure = self.explainer.explain(
@@ -69,9 +64,9 @@ class DiagnosisService:
 
         # DB 저장에 사용할 상세 진단 결과 반환
         return DiagnosisOutcome(
-            is_plant_result,
+            True,
             disease_code,
-            DISEASE_NAMES_KO.get(disease_code, disease_code),
+            DISEASE_NAMES_KO[disease_code],
             explained,
             cause,
             cure,

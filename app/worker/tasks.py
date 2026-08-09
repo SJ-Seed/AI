@@ -1,9 +1,12 @@
 """분석 Queue 작업 처리와 Worker가 소유하는 자원의 생명주기 관리."""
 
 import asyncio
+import random
 from pathlib import Path
 from time import perf_counter
 from typing import Any
+
+from arq import Retry
 
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -12,25 +15,31 @@ from app.core.config import Settings, load_settings, require_openai_api_key
 from app.core.logging import get_logger
 from app.infrastructure.image.image_downloader import (
     ImageDownloader,
+    ImageDownloadFailureKind,
     ImageDownloadResult,
 )
 from app.infrastructure.persistence.analysis_repository import (
     SqlAlchemyAnalysisRepository,
 )
+from app.worker.error_policy import classify_ai_error
 
 
 logger = get_logger(__name__)
 
 # Worker 실패 원인을 DB에 저장할 때 사용하는 고정 오류 코드
 IMAGE_DOWNLOAD_ERROR = "IMAGE_DOWNLOAD_ERROR"
+INVALID_IMAGE_ERROR = "INVALID_IMAGE_ERROR"
 AI_ANALYSIS_ERROR = "AI_ANALYSIS_ERROR"
+AI_AUTHENTICATION_ERROR = "AI_AUTHENTICATION_ERROR"
 WORKER_INTERNAL_ERROR = "WORKER_INTERNAL_ERROR"
 MAX_PERSISTED_ERROR_MESSAGE_LENGTH = 255
 
 # 실제 예외 내용 대신 DB에 저장할 안전한 고정 메시지
 SAFE_ERROR_MESSAGES = {
     IMAGE_DOWNLOAD_ERROR: "Image download failed",
+    INVALID_IMAGE_ERROR: "Invalid image",
     AI_ANALYSIS_ERROR: "AI analysis failed",
+    AI_AUTHENTICATION_ERROR: "AI authentication failed",
     WORKER_INTERNAL_ERROR: "Worker processing failed",
 }
 
@@ -61,17 +70,22 @@ def build_ai_resources(settings: Settings) -> tuple[Any, DiagnosisService]:
     openai_client = OpenAI(
         api_key=api_key,
         timeout=settings.openai_timeout_seconds,
+        max_retries=0,
     )
     try:
         classifier_lm = dspy.LM(
             model="gpt-4o",
             api_key=api_key,
             temperature=0.0,
+            num_retries=0,
+            max_retries=0,
         )
         explainer_lm = dspy.LM(
             model="gpt-4o",
             api_key=api_key,
             temperature=0.5,
+            num_retries=0,
+            max_retries=0,
         )
         compiled_program = dspy.load(str(settings.model_path))
         diagnosis_service = DiagnosisService(
@@ -102,7 +116,10 @@ async def startup(ctx: dict[str, Any]) -> None:
             "session_factory": async_sessionmaker(engine, expire_on_commit=False),
             "openai_client": openai_client,
             "diagnosis_service": diagnosis_service,
-            "image_downloader": ImageDownloader(),
+            "image_downloader": ImageDownloader(
+                max_size_mb=settings.max_image_size_mb,
+                timeout_seconds=settings.image_download_timeout_seconds,
+            ),
             "model_version": settings.model_version or None,
         })
     except Exception:
@@ -162,14 +179,14 @@ async def process_analysis(ctx: dict[str, Any], analysis_id: int) -> bool:
                 ctx["image_downloader"].download,
                 analysis["image_path"],
             )
-        except Exception:
+        except Exception as error:
             # Downloader 자체에서 예상하지 못한 예외가 발생한 경우
             logger.exception(
                 "Image downloader raised unexpectedly",
                 extra={"analysis_id": analysis_id},
             )
-            await _persist_failure(session_factory, analysis_id, IMAGE_DOWNLOAD_ERROR)
-            raise
+            await _persist_failure(session_factory, analysis_id, WORKER_INTERNAL_ERROR)
+            raise error
 
         # Downloader가 정상적으로 실패 결과를 반환한 경우
         if download_result.error is not None or download_result.path is None:
@@ -178,8 +195,18 @@ async def process_analysis(ctx: dict[str, Any], analysis_id: int) -> bool:
                 download_result.error,
                 extra={"analysis_id": analysis_id},
             )
-            await _persist_failure(session_factory, analysis_id, IMAGE_DOWNLOAD_ERROR)
-            raise ImageDownloadFailure(download_result.error or "Image download failed")
+            error = ImageDownloadFailure(download_result.error or "Image download failed")
+            if download_result.failure_kind == ImageDownloadFailureKind.TRANSIENT_NETWORK:
+                await _retry_or_fail(
+                    ctx, session_factory, analysis_id, error, IMAGE_DOWNLOAD_ERROR
+                )
+            code = (
+                INVALID_IMAGE_ERROR
+                if download_result.failure_kind == ImageDownloadFailureKind.INVALID_IMAGE
+                else IMAGE_DOWNLOAD_ERROR
+            )
+            await _persist_failure(session_factory, analysis_id, code)
+            raise error
 
         try:
             # 동기 AI 분석도 이벤트 루프를 막지 않도록 별도 스레드에서 실행
@@ -189,13 +216,24 @@ async def process_analysis(ctx: dict[str, Any], analysis_id: int) -> bool:
                 analysis["temperature"],
                 analysis["humidity"],
             )
-        except Exception:
+        except Exception as error:
             logger.exception(
                 "AI analysis failed",
                 extra={"analysis_id": analysis_id},
             )
-            await _persist_failure(session_factory, analysis_id, AI_ANALYSIS_ERROR)
-            raise
+            disposition = classify_ai_error(error)
+            if disposition.retryable:
+                await _retry_or_fail(
+                    ctx,
+                    session_factory,
+                    analysis_id,
+                    error,
+                    disposition.error_code,
+                )
+            await _persist_failure(
+                session_factory, analysis_id, disposition.error_code
+            )
+            raise error
 
         # 다운로드 시작부터 AI 분석 완료까지 걸린 시간
         latency_ms = int((perf_counter() - started_at) * 1000)
@@ -312,6 +350,51 @@ async def _persist_failure(
             "Failed to persist worker failure",
             extra={"analysis_id": analysis_id, "error_code": error_code},
         )
+
+
+async def _retry_or_fail(
+    ctx: dict[str, Any],
+    session_factory,
+    analysis_id: int,
+    error: BaseException,
+    terminal_error_code: str,
+) -> None:
+    settings: Settings = ctx["settings"]
+    try:
+        async with session_factory() as session:
+            repository = SqlAlchemyAnalysisRepository(session)
+            retry_count = await repository.reschedule_for_retry(
+                analysis_id, max_retry_count=settings.max_retry_count
+            )
+    except Exception:
+        logger.exception(
+            "Failed to reschedule analysis retry",
+            extra={"analysis_id": analysis_id},
+        )
+        await _persist_failure(
+            session_factory, analysis_id, WORKER_INTERNAL_ERROR
+        )
+        raise
+
+    if retry_count is None:
+        await _persist_failure(session_factory, analysis_id, terminal_error_code)
+        raise error
+
+    cap = min(
+        settings.retry_max_delay_seconds,
+        settings.retry_base_delay_seconds * (2 ** (retry_count - 1)),
+    )
+    delay = random.uniform(0, cap)
+    logger.warning(
+        "Retrying transient analysis failure: %s",
+        error,
+        extra={
+            "analysis_id": analysis_id,
+            "retry_count": retry_count,
+            "retry_delay_seconds": delay,
+        },
+    )
+    raise Retry(defer=delay)
 
 
 def _remove_owned_temporary_file(

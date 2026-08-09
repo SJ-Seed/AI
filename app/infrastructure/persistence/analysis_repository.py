@@ -64,6 +64,39 @@ class SqlAlchemyAnalysisRepository(AnalysisRepository):
         )
         return await self._execute_transition(statement)
 
+    # 일시적 오류가 발생한 분석 작업을 재시도 대기 상태로 변경
+    async def reschedule_for_retry(
+        self, analysis_id: int, *, max_retry_count: int
+    ) -> int | None:
+        statement = (
+            update(Analysis)
+            .where(
+                Analysis.id == analysis_id,
+                Analysis.status == AnalysisStatus.PROCESSING,
+                Analysis.retry_count < max_retry_count,
+            )
+            .values(
+                status=AnalysisStatus.PENDING,
+                retry_count=Analysis.retry_count + 1,
+                started_at=None,
+                completed_at=None,
+                error_code=None,
+                error_message=None,
+            )
+            .returning(Analysis.retry_count)
+        )
+        try:
+            result = await self.session.execute(statement)
+            retry_count = result.scalar_one_or_none()
+            if retry_count is None:
+                await self.session.rollback()
+                return None
+            await self.session.commit()
+            return int(retry_count)
+        except Exception:
+            await self.session.rollback()
+            raise
+
     # 분석이 성공적으로 완료되었을 때 결과 저장
     async def mark_completed(
         self,

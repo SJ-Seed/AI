@@ -31,7 +31,7 @@ class WorkerSettings:
     max_jobs = 1
 
     # 최초 실행을 포함한 최대 실행 횟수
-    max_tries = 1
+    max_tries = _settings.max_retry_count + 1
 
     # 작업 실패 시 arq가 자동으로 다시 Queue에 넣지 않도록 설정
-    retry_jobs = False
+    retry_jobs = True
