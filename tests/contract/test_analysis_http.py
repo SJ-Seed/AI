@@ -18,6 +18,7 @@ class AnalysisHttpTest(unittest.TestCase):
         self.repository.mark_completed = AsyncMock(return_value=True)
         self.repository.mark_failed = AsyncMock(return_value=True)
         self.repository.mark_enqueue_failed = AsyncMock(return_value=True)
+        self.repository.mark_enqueued = AsyncMock(return_value=True)
         self.queue = Mock()
         self.queue.enqueue = AsyncMock(return_value=None)
 
@@ -39,6 +40,7 @@ class AnalysisHttpTest(unittest.TestCase):
         calls = Mock()
         calls.attach_mock(self.repository.create, "create")
         calls.attach_mock(self.queue.enqueue, "enqueue")
+        calls.attach_mock(self.repository.mark_enqueued, "mark_enqueued")
 
         response = self.client.post("/analyze", json=self.valid_request)
 
@@ -52,11 +54,21 @@ class AnalysisHttpTest(unittest.TestCase):
         self.assertEqual(calls.mock_calls, [
             call.create(**self.valid_request),
             call.enqueue(11),
+            call.mark_enqueued(11),
         ])
         self.repository.mark_processing.assert_not_awaited()
         self.repository.mark_completed.assert_not_awaited()
         self.repository.mark_failed.assert_not_awaited()
         self.repository.mark_enqueue_failed.assert_not_awaited()
+
+    def test_enqueue_tracking_failure_still_returns_accepted(self):
+        self.repository.mark_enqueued.side_effect = RuntimeError("database unavailable")
+
+        with self.assertLogs("app.api.routes.analysis", level="ERROR"):
+            response = self.client.post("/analyze", json=self.valid_request)
+
+        self.assertEqual(response.status_code, 202)
+        self.queue.enqueue.assert_awaited_once_with(11)
 
     def test_queue_failure_is_compensated_with_safe_error_and_returns_503(self):
         secret = "redis password=do-not-persist"
@@ -73,6 +85,7 @@ class AnalysisHttpTest(unittest.TestCase):
         self.assertEqual(kwargs["error_message"], "Analysis queue is temporarily unavailable")
         self.assertLessEqual(len(kwargs["error_message"]), 255)
         self.assertNotIn(secret, kwargs["error_message"])
+        self.repository.mark_enqueued.assert_not_awaited()
 
     def test_queue_failure_returns_503_when_compensation_is_not_applied(self):
         self.queue.enqueue.side_effect = RuntimeError("redis unavailable")

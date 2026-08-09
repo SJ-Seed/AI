@@ -76,6 +76,18 @@ class Analysis(Base):
         nullable=True,
     )
 
+    # Redis Queue 등록이 확인된 시각
+    enqueued_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    # reconciliation 프로세스가 Queue 등록을 선점한 시각
+    enqueue_claimed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
     # 분석이 성공 또는 실패로 종료된 시각
     completed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),

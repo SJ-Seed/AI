@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from unittest.mock import AsyncMock, Mock
 
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.dialects import postgresql
 
 from app.domain.enums import AnalysisStatus
 from app.infrastructure.persistence.analysis_repository import (
@@ -162,6 +163,46 @@ class AnalysisRepositoryTest(unittest.TestCase):
         self.assertIsNone(retry_count)
         self.session.rollback.assert_awaited_once_with()
         self.session.commit.assert_not_awaited()
+
+    def test_mark_enqueued_records_registration_and_clears_claim(self):
+        self._set_rowcounts(1)
+
+        self.assertTrue(asyncio.run(self.repository.mark_enqueued(7)))
+
+        params = self._executed_params()
+        self.assertEqual(params["id_1"], 7)
+        self.assertIsNotNone(params["enqueued_at"])
+        self.assertIsNone(params["enqueue_claimed_at"])
+
+    def test_claim_unenqueued_pending_returns_atomically_claimed_ids(self):
+        result = Mock()
+        result.scalars.return_value.all.return_value = [3, 7]
+        self.session.execute.return_value = result
+        created_before = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        claim_stale_before = datetime(2025, 12, 31, tzinfo=timezone.utc)
+
+        ids = asyncio.run(self.repository.claim_unenqueued_pending(
+            created_before=created_before,
+            claim_stale_before=claim_stale_before,
+            limit=100,
+        ))
+
+        self.assertEqual(ids, [3, 7])
+        statement = self.session.execute.await_args.args[0]
+        sql = str(statement.compile(dialect=postgresql.dialect()))
+        self.assertIn("FOR UPDATE", sql)
+        self.assertIn("SKIP LOCKED", sql)
+        self.assertIn("enqueued_at IS NULL", sql)
+        self.session.commit.assert_awaited_once_with()
+
+    def test_release_enqueue_claim_only_updates_unenqueued_analysis(self):
+        self._set_rowcounts(1)
+
+        self.assertTrue(asyncio.run(self.repository.release_enqueue_claim(7)))
+
+        params = self._executed_params()
+        self.assertEqual(params["id_1"], 7)
+        self.assertIsNone(params["enqueue_claimed_at"])
 
     def test_mark_completed_requires_processing_and_records_all_results(self):
         self._set_rowcounts(1)

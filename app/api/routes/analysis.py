@@ -95,6 +95,21 @@ async def analyze_endpoint(
             detail="Analysis queue unavailable",
         ) from error
 
+    # Redis 등록이 확인된 작업은 reconciliation 대상에서 제외
+    try:
+        marked_enqueued = await repository.mark_enqueued(analysis_id)
+        if not marked_enqueued:
+            logger.info(
+                "Analysis Queue registration was already recorded",
+                extra={"analysis_id": analysis_id},
+            )
+    except Exception:
+        # Queue 등록은 완료되었으므로 고유 job ID를 사용하는 reconciliation이 안전하게 보완한다.
+        logger.exception(
+            "Failed to record analysis Queue registration",
+            extra={"analysis_id": analysis_id},
+        )
+
     # 3. 클라이언트가 분석 상태를 조회할 수 있는 API 주소 생성
     status_url = f"/analyses/{analysis_id}"
     response.headers["Location"] = status_url

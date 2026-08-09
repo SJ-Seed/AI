@@ -50,6 +50,9 @@ class SettingsTest(unittest.TestCase):
         self.assertEqual(settings.retry_max_delay_seconds, 60)
         self.assertEqual(settings.image_download_timeout_seconds, 10)
         self.assertEqual(settings.processing_timeout_seconds, 300)
+        self.assertEqual(settings.reconciliation_min_age_seconds, 30)
+        self.assertEqual(settings.reconciliation_claim_timeout_seconds, 300)
+        self.assertEqual(settings.reconciliation_batch_size, 100)
 
     def test_invalid_worker_limits_are_rejected(self):
         invalid_values = (
@@ -57,6 +60,9 @@ class SettingsTest(unittest.TestCase):
             {"MAX_IMAGE_SIZE_MB": "0"},
             {"IMAGE_DOWNLOAD_TIMEOUT_SECONDS": "0"},
             {"PROCESSING_TIMEOUT_SECONDS": "0"},
+            {"RECONCILIATION_MIN_AGE_SECONDS": "0"},
+            {"RECONCILIATION_CLAIM_TIMEOUT_SECONDS": "0"},
+            {"RECONCILIATION_BATCH_SIZE": "0"},
             {"RETRY_BASE_DELAY_SECONDS": "3", "RETRY_MAX_DELAY_SECONDS": "2"},
         )
         for values in invalid_values:

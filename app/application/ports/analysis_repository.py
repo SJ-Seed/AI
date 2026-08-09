@@ -47,6 +47,24 @@ class AnalysisRepository(Protocol):
         """Return the incremented retry count after PROCESSING -> PENDING."""
         ...
 
+    async def mark_enqueued(self, analysis_id: int) -> bool:
+        """Record that Redis Queue registration was confirmed."""
+        ...
+
+    async def claim_unenqueued_pending(
+        self,
+        *,
+        created_before: datetime,
+        claim_stale_before: datetime,
+        limit: int,
+    ) -> list[int]:
+        """Claim old pending analyses that have not been registered in Redis."""
+        ...
+
+    async def release_enqueue_claim(self, analysis_id: int) -> bool:
+        """Release a reconciliation claim after an enqueue error."""
+        ...
+
     # 분석이 정상적으로 끝났을 떄 결과를 저장하고 COMPLETED 상태로 변경
     async def mark_completed(
         self,

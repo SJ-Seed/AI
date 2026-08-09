@@ -22,6 +22,9 @@ class Settings:
     retry_max_delay_seconds: float = 60
     image_download_timeout_seconds: float = 10
     processing_timeout_seconds: float = 300
+    reconciliation_min_age_seconds: float = 30
+    reconciliation_claim_timeout_seconds: float = 300
+    reconciliation_batch_size: int = 100
 
 
 def load_settings() -> Settings:
@@ -43,6 +46,13 @@ def load_settings() -> Settings:
         retry_max_delay_seconds=float(os.getenv("RETRY_MAX_DELAY_SECONDS", "60")),
         image_download_timeout_seconds=float(os.getenv("IMAGE_DOWNLOAD_TIMEOUT_SECONDS", "10")),
         processing_timeout_seconds=float(os.getenv("PROCESSING_TIMEOUT_SECONDS", "300")),
+        reconciliation_min_age_seconds=float(
+            os.getenv("RECONCILIATION_MIN_AGE_SECONDS", "30")
+        ),
+        reconciliation_claim_timeout_seconds=float(
+            os.getenv("RECONCILIATION_CLAIM_TIMEOUT_SECONDS", "300")
+        ),
+        reconciliation_batch_size=int(os.getenv("RECONCILIATION_BATCH_SIZE", "100")),
     )
     if settings.max_retry_count < 0:
         raise RuntimeError("MAX_RETRY_COUNT must be non-negative")
@@ -56,6 +66,12 @@ def load_settings() -> Settings:
         raise RuntimeError("IMAGE_DOWNLOAD_TIMEOUT_SECONDS must be positive")
     if settings.processing_timeout_seconds <= 0:
         raise RuntimeError("PROCESSING_TIMEOUT_SECONDS must be positive")
+    if settings.reconciliation_min_age_seconds <= 0:
+        raise RuntimeError("RECONCILIATION_MIN_AGE_SECONDS must be positive")
+    if settings.reconciliation_claim_timeout_seconds <= 0:
+        raise RuntimeError("RECONCILIATION_CLAIM_TIMEOUT_SECONDS must be positive")
+    if settings.reconciliation_batch_size <= 0:
+        raise RuntimeError("RECONCILIATION_BATCH_SIZE must be positive")
     return settings
 
 

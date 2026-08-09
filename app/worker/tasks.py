@@ -23,6 +23,7 @@ from app.infrastructure.image.image_downloader import (
 from app.infrastructure.persistence.analysis_repository import (
     SqlAlchemyAnalysisRepository,
 )
+from app.infrastructure.queue.arq_analysis_queue import ArqAnalysisQueue
 from app.worker.error_policy import classify_ai_error
 
 
@@ -140,6 +141,59 @@ async def shutdown(ctx: dict[str, Any]) -> None:
     engine = ctx.get("engine")
     if engine is not None:
         await engine.dispose()
+
+
+async def reconcile_pending_analyses(ctx: dict[str, Any]) -> int:
+    """Re-enqueue old PENDING analyses whose Redis registration was not confirmed."""
+    settings: Settings = ctx["settings"]
+    session_factory = ctx["session_factory"]
+    now = datetime.now(timezone.utc)
+
+    async with session_factory() as session:
+        repository = SqlAlchemyAnalysisRepository(session)
+        analysis_ids = await repository.claim_unenqueued_pending(
+            created_before=now
+            - timedelta(seconds=settings.reconciliation_min_age_seconds),
+            claim_stale_before=now
+            - timedelta(seconds=settings.reconciliation_claim_timeout_seconds),
+            limit=settings.reconciliation_batch_size,
+        )
+
+    queue = ArqAnalysisQueue(ctx["redis"], settings.analysis_queue_name)
+    enqueued_count = 0
+    for analysis_id in analysis_ids:
+        try:
+            await queue.enqueue(analysis_id)
+        except Exception:
+            logger.exception(
+                "Failed to reconcile analysis Queue registration",
+                extra={"analysis_id": analysis_id},
+            )
+            try:
+                async with session_factory() as session:
+                    repository = SqlAlchemyAnalysisRepository(session)
+                    await repository.release_enqueue_claim(analysis_id)
+            except Exception:
+                # claim lease 만료 후 다음 reconciliation이 다시 선점한다.
+                logger.exception(
+                    "Failed to release analysis reconciliation claim",
+                    extra={"analysis_id": analysis_id},
+                )
+            continue
+
+        try:
+            async with session_factory() as session:
+                repository = SqlAlchemyAnalysisRepository(session)
+                await repository.mark_enqueued(analysis_id)
+            enqueued_count += 1
+        except Exception:
+            # Redis job ID가 멱등적이므로 claim 만료 후 안전하게 다시 시도할 수 있다.
+            logger.exception(
+                "Failed to record reconciled Queue registration",
+                extra={"analysis_id": analysis_id},
+            )
+
+    return enqueued_count
 
 
 async def process_analysis(ctx: dict[str, Any], analysis_id: int) -> bool:

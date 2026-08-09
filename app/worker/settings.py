@@ -2,7 +2,9 @@
 
 from app.core.config import load_settings, require_redis_url
 from app.infrastructure.queue.redis_settings import build_redis_settings
-from app.worker.tasks import process_analysis, shutdown, startup
+from arq import cron
+
+from app.worker.tasks import process_analysis, reconcile_pending_analyses, shutdown, startup
 
 
 # Worker 프로세스 시작 시 환경변수와 애플리케이션 설정 로드
@@ -14,6 +16,9 @@ class WorkerSettings:
 
     # Queue에서 작업을 받으면 실행할 함수
     functions = [process_analysis]
+
+    # Queue 등록이 확인되지 않은 오래된 PENDING 작업을 매분 복구
+    cron_jobs = [cron(reconcile_pending_analyses, second=0)]
 
     # Worker 시작 시 DB, OpenAI 및 AI 모델 자원을 초기화하는 함수
     on_startup = startup

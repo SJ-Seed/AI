@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from datetime import datetime, timezone
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, Mock, call, patch
 
 from arq import Retry
 
@@ -21,6 +21,7 @@ from app.worker.tasks import (
     ImageDownloadFailure,
     WorkerInternalFailure,
     process_analysis,
+    reconcile_pending_analyses,
     shutdown,
     startup,
     build_ai_resources,
@@ -373,6 +374,67 @@ class WorkerLifecycleTest(unittest.TestCase):
         for call in lm.call_args_list:
             self.assertEqual(call.kwargs["num_retries"], 0)
             self.assertEqual(call.kwargs["max_retries"], 0)
+
+
+class ReconciliationTaskTest(unittest.TestCase):
+    def setUp(self):
+        self.repository = Mock()
+        self.repository.claim_unenqueued_pending = AsyncMock(return_value=[11, 12])
+        self.repository.mark_enqueued = AsyncMock(return_value=True)
+        self.repository.release_enqueue_claim = AsyncMock(return_value=True)
+        self.queue = Mock()
+        self.queue.enqueue = AsyncMock()
+        self.ctx = {
+            "settings": Settings(
+                openai_api_key="key",
+                database_url="database",
+                redis_url="redis",
+                analysis_queue_name="analysis",
+                model_path=Path("model"),
+                model_version="v1",
+                openai_timeout_seconds=30,
+                max_retry_count=4,
+                max_image_size_mb=10,
+            ),
+            "session_factory": SessionFactory(),
+            "redis": object(),
+        }
+
+    def test_reconciles_claimed_analyses_and_marks_them_enqueued(self):
+        with patch(
+            "app.worker.tasks.SqlAlchemyAnalysisRepository",
+            return_value=self.repository,
+        ), patch(
+            "app.worker.tasks.ArqAnalysisQueue", return_value=self.queue
+        ) as queue_type:
+            count = asyncio.run(reconcile_pending_analyses(self.ctx))
+
+        self.assertEqual(count, 2)
+        queue_type.assert_called_once_with(self.ctx["redis"], "analysis")
+        self.assertEqual(
+            self.queue.enqueue.await_args_list,
+            [call(11), call(12)],
+        )
+        self.assertEqual(
+            self.repository.mark_enqueued.await_args_list,
+            [call(11), call(12)],
+        )
+
+    def test_enqueue_failure_releases_claim_for_later_reconciliation(self):
+        self.repository.claim_unenqueued_pending.return_value = [11]
+        self.queue.enqueue.side_effect = RuntimeError("redis unavailable")
+
+        with patch(
+            "app.worker.tasks.SqlAlchemyAnalysisRepository",
+            return_value=self.repository,
+        ), patch("app.worker.tasks.ArqAnalysisQueue", return_value=self.queue), self.assertLogs(
+            "app.worker.tasks", level="ERROR"
+        ):
+            count = asyncio.run(reconcile_pending_analyses(self.ctx))
+
+        self.assertEqual(count, 0)
+        self.repository.release_enqueue_claim.assert_awaited_once_with(11)
+        self.repository.mark_enqueued.assert_not_awaited()
 
 
 if __name__ == "__main__":

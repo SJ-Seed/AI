@@ -2,7 +2,7 @@
 
 from datetime import datetime, timezone
 
-from sqlalchemy import and_, or_, update
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.ports.analysis_repository import AnalysisRepository
@@ -51,6 +51,7 @@ class SqlAlchemyAnalysisRepository(AnalysisRepository):
 
     # PENDING 상태의 분석 작업을 원자적으로 선점
     async def claim_pending(self, analysis_id: int) -> bool:
+        now = datetime.now(timezone.utc)
         statement = (
             update(Analysis)
             .where(
@@ -59,7 +60,9 @@ class SqlAlchemyAnalysisRepository(AnalysisRepository):
             )
             .values(
                 status=AnalysisStatus.PROCESSING,
-                started_at=datetime.now(timezone.utc),
+                started_at=now,
+                enqueued_at=func.coalesce(Analysis.enqueued_at, now),
+                enqueue_claimed_at=None,
             )
         )
         return await self._execute_transition(statement)
@@ -67,6 +70,7 @@ class SqlAlchemyAnalysisRepository(AnalysisRepository):
     async def claim_pending_or_stale(
         self, analysis_id: int, *, stale_before: datetime
     ) -> bool:
+        now = datetime.now(timezone.utc)
         statement = (
             update(Analysis)
             .where(
@@ -84,7 +88,9 @@ class SqlAlchemyAnalysisRepository(AnalysisRepository):
             )
             .values(
                 status=AnalysisStatus.PROCESSING,
-                started_at=datetime.now(timezone.utc),
+                started_at=now,
+                enqueued_at=func.coalesce(Analysis.enqueued_at, now),
+                enqueue_claimed_at=None,
             )
         )
         return await self._execute_transition(statement)
@@ -121,6 +127,69 @@ class SqlAlchemyAnalysisRepository(AnalysisRepository):
         except Exception:
             await self.session.rollback()
             raise
+
+    async def mark_enqueued(self, analysis_id: int) -> bool:
+        statement = (
+            update(Analysis)
+            .where(
+                Analysis.id == analysis_id,
+                Analysis.enqueued_at.is_(None),
+            )
+            .values(
+                enqueued_at=datetime.now(timezone.utc),
+                enqueue_claimed_at=None,
+            )
+        )
+        return await self._execute_transition(statement)
+
+    async def claim_unenqueued_pending(
+        self,
+        *,
+        created_before: datetime,
+        claim_stale_before: datetime,
+        limit: int,
+    ) -> list[int]:
+        candidates = (
+            select(Analysis.id)
+            .where(
+                Analysis.status == AnalysisStatus.PENDING,
+                Analysis.enqueued_at.is_(None),
+                Analysis.created_at <= created_before,
+                or_(
+                    Analysis.enqueue_claimed_at.is_(None),
+                    Analysis.enqueue_claimed_at <= claim_stale_before,
+                ),
+            )
+            .order_by(Analysis.id)
+            .limit(limit)
+            .with_for_update(skip_locked=True)
+        )
+        statement = (
+            update(Analysis)
+            .where(Analysis.id.in_(candidates))
+            .values(enqueue_claimed_at=datetime.now(timezone.utc))
+            .returning(Analysis.id)
+        )
+        try:
+            result = await self.session.execute(statement)
+            analysis_ids = list(result.scalars().all())
+            await self.session.commit()
+            return analysis_ids
+        except Exception:
+            await self.session.rollback()
+            raise
+
+    async def release_enqueue_claim(self, analysis_id: int) -> bool:
+        statement = (
+            update(Analysis)
+            .where(
+                Analysis.id == analysis_id,
+                Analysis.enqueued_at.is_(None),
+                Analysis.enqueue_claimed_at.is_not(None),
+            )
+            .values(enqueue_claimed_at=None)
+        )
+        return await self._execute_transition(statement)
 
     # 분석이 성공적으로 완료되었을 때 결과 저장
     async def mark_completed(
@@ -302,5 +371,7 @@ class SqlAlchemyAnalysisRepository(AnalysisRepository):
             "error_message": analysis.error_message,
             "created_at": analysis.created_at,
             "started_at": analysis.started_at,
+            "enqueued_at": analysis.enqueued_at,
+            "enqueue_claimed_at": analysis.enqueue_claimed_at,
             "completed_at": analysis.completed_at,
         }
