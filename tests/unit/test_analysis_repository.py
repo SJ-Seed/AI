@@ -16,6 +16,7 @@ class AnalysisRepositoryTest(unittest.TestCase):
     def setUp(self):
         self.session = Mock(spec=AsyncSession)
         self.session.get = AsyncMock()
+        self.session.execute = AsyncMock()
         self.session.commit = AsyncMock()
         self.session.rollback = AsyncMock()
         self.session.flush = AsyncMock()
@@ -72,50 +73,88 @@ class AnalysisRepositoryTest(unittest.TestCase):
         self.assertIsNone(asyncio.run(self.repository.get_by_id(404)))
         self.session.commit.assert_not_awaited()
 
-    def test_mark_processing_updates_status_and_started_at(self):
-        analysis = self._analysis()
-        self.session.get.return_value = analysis
+    def test_claim_pending_atomically_changes_pending_to_processing(self):
+        self._set_rowcounts(1)
 
-        result = asyncio.run(self.repository.mark_processing(1))
+        result = asyncio.run(self.repository.claim_pending(7))
 
         self.assertTrue(result)
-        self.assertEqual(analysis.status, AnalysisStatus.PROCESSING)
-        self.assertEqual(analysis.started_at.tzinfo, timezone.utc)
+        params = self._executed_params()
+        self.assertEqual(params["id_1"], 7)
+        self.assertEqual(params["status_1"], AnalysisStatus.PENDING)
+        self.assertEqual(params["status"], AnalysisStatus.PROCESSING)
+        self.assertEqual(params["started_at"].tzinfo, timezone.utc)
         self.session.commit.assert_awaited_once_with()
+        self.session.rollback.assert_not_awaited()
 
-    def test_mark_completed_records_all_results(self):
-        analysis = self._analysis()
-        self.session.get.return_value = analysis
+    def test_claim_pending_returns_false_when_state_does_not_match(self):
+        self._set_rowcounts(0)
+
+        self.assertFalse(asyncio.run(self.repository.claim_pending(7)))
+
+        self.session.commit.assert_not_awaited()
+        self.session.rollback.assert_awaited_once_with()
+
+    def test_only_first_of_two_claims_succeeds(self):
+        self._set_rowcounts(1, 0)
+
+        first = asyncio.run(self.repository.claim_pending(7))
+        second = asyncio.run(self.repository.claim_pending(7))
+
+        self.assertTrue(first)
+        self.assertFalse(second)
+        self.assertEqual(self.session.execute.await_count, 2)
+        self.session.commit.assert_awaited_once_with()
+        self.session.rollback.assert_awaited_once_with()
+
+    def test_mark_processing_delegates_to_claim_pending(self):
+        self.repository.claim_pending = AsyncMock(return_value=False)
+
+        result = asyncio.run(self.repository.mark_processing(7))
+
+        self.assertFalse(result)
+        self.repository.claim_pending.assert_awaited_once_with(7)
+
+    def test_mark_completed_requires_processing_and_records_all_results(self):
+        self._set_rowcounts(1)
 
         result = asyncio.run(self.repository.mark_completed(
             1,
             is_plant=True,
             disease_code="Leaf_mold",
-            disease_name="잎곰팡이병",
-            explain="설명",
-            cause="원인",
-            cure="치료",
+            disease_name="leaf mold",
+            explain="explain",
+            cause="cause",
+            cure="cure",
             model_version="classifier-v1",
             latency_ms=1250,
         ))
 
         self.assertTrue(result)
-        self.assertEqual(analysis.status, AnalysisStatus.COMPLETED)
-        self.assertTrue(analysis.is_plant)
-        self.assertEqual(analysis.disease_code, "Leaf_mold")
-        self.assertEqual(analysis.disease_name, "잎곰팡이병")
-        self.assertEqual(analysis.explain, "설명")
-        self.assertEqual(analysis.cause, "원인")
-        self.assertEqual(analysis.cure, "치료")
-        self.assertEqual(analysis.model_version, "classifier-v1")
-        self.assertEqual(analysis.latency_ms, 1250)
-        self.assertEqual(analysis.completed_at.tzinfo, timezone.utc)
-        self.session.commit.assert_awaited_once_with()
+        params = self._executed_params()
+        self.assertEqual(params["status_1"], AnalysisStatus.PROCESSING)
+        self.assertEqual(params["status"], AnalysisStatus.COMPLETED)
+        self.assertTrue(params["is_plant"])
+        self.assertEqual(params["disease_code"], "Leaf_mold")
+        self.assertEqual(params["disease_name"], "leaf mold")
+        self.assertEqual(params["explain"], "explain")
+        self.assertEqual(params["cause"], "cause")
+        self.assertEqual(params["cure"], "cure")
+        self.assertEqual(params["model_version"], "classifier-v1")
+        self.assertEqual(params["latency_ms"], 1250)
+        self.assertEqual(params["completed_at"].tzinfo, timezone.utc)
 
-    def test_mark_failed_records_error_without_changing_job_retry_count(self):
-        analysis = self._analysis()
-        analysis.retry_count = 3
-        self.session.get.return_value = analysis
+    def test_mark_completed_rejects_non_processing_analysis(self):
+        self._set_rowcounts(0)
+
+        result = asyncio.run(self.repository.mark_completed(1, is_plant=True))
+
+        self.assertFalse(result)
+        self.session.commit.assert_not_awaited()
+        self.session.rollback.assert_awaited_once_with()
+
+    def test_mark_failed_only_accepts_processing_analysis(self):
+        self._set_rowcounts(1)
 
         result = asyncio.run(self.repository.mark_failed(
             1,
@@ -124,41 +163,93 @@ class AnalysisRepositoryTest(unittest.TestCase):
         ))
 
         self.assertTrue(result)
-        self.assertEqual(analysis.status, AnalysisStatus.FAILED)
-        self.assertEqual(analysis.error_code, "MODEL_ERROR")
-        self.assertEqual(analysis.error_message, "classification failed")
-        self.assertEqual(analysis.retry_count, 3)
-        self.assertEqual(analysis.completed_at.tzinfo, timezone.utc)
-        self.session.commit.assert_awaited_once_with()
+        params = self._executed_params()
+        self.assertEqual(params["status_1"], AnalysisStatus.PROCESSING)
+        self._assert_failure_params(params)
 
-    def test_missing_update_returns_false_without_commit(self):
-        self.session.get.return_value = None
+    def test_mark_enqueue_failed_only_accepts_pending_analysis(self):
+        self._set_rowcounts(1)
 
-        self.assertFalse(asyncio.run(self.repository.mark_processing(404)))
-        self.session.commit.assert_not_awaited()
+        result = asyncio.run(self.repository.mark_enqueue_failed(
+            1,
+            error_code="QUEUE_ERROR",
+            error_message="enqueue failed",
+        ))
 
-    def test_commit_error_rolls_back_and_propagates(self):
-        error = RuntimeError("commit failed")
-        self.session.get.return_value = self._analysis()
-        self.session.commit.side_effect = error
+        self.assertTrue(result)
+        params = self._executed_params()
+        self.assertEqual(params["status_1"], AnalysisStatus.PENDING)
+        self.assertEqual(params["error_code"], "QUEUE_ERROR")
+        self.assertEqual(params["error_message"], "enqueue failed")
+        self.assertNotIn("retry_count", params)
+
+    def test_failure_transitions_return_false_for_disallowed_state(self):
+        for method_name in ("mark_failed", "mark_enqueue_failed"):
+            with self.subTest(method=method_name):
+                self.session.reset_mock()
+                self._set_rowcounts(0)
+                method = getattr(self.repository, method_name)
+
+                result = asyncio.run(method(
+                    1,
+                    error_code="ERROR",
+                    error_message="failed",
+                ))
+
+                self.assertFalse(result)
+                self.session.commit.assert_not_awaited()
+                self.session.rollback.assert_awaited_once_with()
+
+    def test_execute_error_rolls_back_and_propagates(self):
+        error = RuntimeError("execute failed")
+        self.session.execute.side_effect = error
 
         with self.assertRaises(RuntimeError) as raised:
-            asyncio.run(self.repository.mark_processing(1))
+            asyncio.run(self.repository.claim_pending(1))
 
         self.assertIs(raised.exception, error)
         self.session.rollback.assert_awaited_once_with()
-        self.session.flush.assert_not_awaited()
+        self.session.commit.assert_not_awaited()
 
-    @staticmethod
-    def _analysis() -> Analysis:
-        return Analysis(
-            id=1,
-            status=AnalysisStatus.PENDING,
-            image_path="image",
-            temperature="28",
-            humidity="85",
-            retry_count=0,
-        )
+    def test_transition_commit_error_rolls_back_and_propagates(self):
+        self._set_rowcounts(1)
+        error = RuntimeError("commit failed")
+        self.session.commit.side_effect = error
+
+        with self.assertRaises(RuntimeError) as raised:
+            asyncio.run(self.repository.claim_pending(1))
+
+        self.assertIs(raised.exception, error)
+        self.session.rollback.assert_awaited_once_with()
+
+    def test_create_commit_error_rolls_back_and_propagates(self):
+        error = RuntimeError("commit failed")
+        self.session.commit.side_effect = error
+
+        with self.assertRaises(RuntimeError) as raised:
+            asyncio.run(self.repository.create(
+                image_path="image",
+                temperature="28",
+                humidity="85",
+            ))
+
+        self.assertIs(raised.exception, error)
+        self.session.rollback.assert_awaited_once_with()
+
+    def _set_rowcounts(self, *rowcounts: int) -> None:
+        results = [Mock(rowcount=rowcount) for rowcount in rowcounts]
+        self.session.execute.side_effect = results
+
+    def _executed_params(self) -> dict[str, object]:
+        statement = self.session.execute.await_args.args[0]
+        return statement.compile().params
+
+    def _assert_failure_params(self, params: dict[str, object]) -> None:
+        self.assertEqual(params["status"], AnalysisStatus.FAILED)
+        self.assertEqual(params["error_code"], "MODEL_ERROR")
+        self.assertEqual(params["error_message"], "classification failed")
+        self.assertEqual(params["completed_at"].tzinfo, timezone.utc)
+        self.assertNotIn("retry_count", params)
 
 
 if __name__ == "__main__":
