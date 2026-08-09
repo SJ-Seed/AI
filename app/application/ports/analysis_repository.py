@@ -28,6 +28,11 @@ class AnalysisRepository(Protocol):
     async def mark_processing(self, analysis_id: int) -> bool:
         ...
 
+    # PENDING 상태의 분석 작업을 원자적으로 선점
+    async def claim_pending(self, analysis_id: int) -> bool:
+        """Atomically change a pending analysis to processing."""
+        ...
+
     # 분석이 정상적으로 끝났을 떄 결과를 저장하고 COMPLETED 상태로 변경
     async def mark_completed(
         self,
@@ -52,4 +57,15 @@ class AnalysisRepository(Protocol):
         error_code: str,
         error_message: str,
     ) -> bool:
+        ...
+
+    # 큐 등록에 실패한 PENDING 분석을 FAILED 상태로 변경
+    async def mark_enqueue_failed(
+        self,
+        analysis_id: int,
+        *,
+        error_code: str,
+        error_message: str,
+    ) -> bool:
+        """Fail a pending analysis when it could not be enqueued."""
         ...
