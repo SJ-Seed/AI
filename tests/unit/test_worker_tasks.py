@@ -4,9 +4,14 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
 
+from arq import Retry
+
 from app.core.config import Settings
 from app.domain.models import DiagnosisOutcome
-from app.infrastructure.image.image_downloader import ImageDownloadResult
+from app.infrastructure.image.image_downloader import (
+    ImageDownloadFailureKind,
+    ImageDownloadResult,
+)
 from app.worker.tasks import (
     AI_ANALYSIS_ERROR,
     IMAGE_DOWNLOAD_ERROR,
@@ -16,6 +21,7 @@ from app.worker.tasks import (
     process_analysis,
     shutdown,
     startup,
+    build_ai_resources,
 )
 
 
@@ -44,6 +50,7 @@ class WorkerTaskTest(unittest.TestCase):
         })
         self.repository.mark_completed = AsyncMock(return_value=True)
         self.repository.mark_failed = AsyncMock(return_value=True)
+        self.repository.reschedule_for_retry = AsyncMock(return_value=1)
         self.downloader = Mock()
         self.diagnosis_service = Mock()
         self.diagnosis_service.diagnose_with_details.return_value = DiagnosisOutcome(
@@ -55,6 +62,17 @@ class WorkerTaskTest(unittest.TestCase):
             "cure",
         )
         self.ctx = {
+            "settings": Settings(
+                openai_api_key="key",
+                database_url="database",
+                redis_url="redis",
+                analysis_queue_name="analysis",
+                model_path=Path("model"),
+                model_version="v1",
+                openai_timeout_seconds=30,
+                max_retry_count=4,
+                max_image_size_mb=10,
+            ),
             "session_factory": SessionFactory(),
             "image_downloader": self.downloader,
             "diagnosis_service": self.diagnosis_service,
@@ -126,8 +144,8 @@ class WorkerTaskTest(unittest.TestCase):
         self.assertIs(raised.exception, error)
         self.assertTrue(any(secret in entry for entry in logs.output))
         kwargs = self.repository.mark_failed.await_args.kwargs
-        self.assertEqual(kwargs["error_code"], IMAGE_DOWNLOAD_ERROR)
-        self.assertEqual(kwargs["error_message"], "Image download failed")
+        self.assertEqual(kwargs["error_code"], WORKER_INTERNAL_ERROR)
+        self.assertEqual(kwargs["error_message"], "Worker processing failed")
         self.assertNotIn(secret, kwargs["error_message"])
 
     def test_ai_error_uses_fixed_code_preserves_local_file_and_reraises(self):
@@ -146,8 +164,8 @@ class WorkerTaskTest(unittest.TestCase):
             self.assertTrue(Path(local_path).exists())
             self.assertTrue(any(secret in entry for entry in logs.output))
             kwargs = self.repository.mark_failed.await_args.kwargs
-            self.assertEqual(kwargs["error_code"], AI_ANALYSIS_ERROR)
-            self.assertEqual(kwargs["error_message"], "AI analysis failed")
+            self.assertEqual(kwargs["error_code"], WORKER_INTERNAL_ERROR)
+            self.assertEqual(kwargs["error_message"], "Worker processing failed")
             self.assertNotIn(secret, kwargs["error_message"])
         finally:
             Path(local_path).unlink(missing_ok=True)
@@ -167,6 +185,79 @@ class WorkerTaskTest(unittest.TestCase):
             self.assertEqual(kwargs["error_message"], "Worker processing failed")
         finally:
             Path(local_path).unlink(missing_ok=True)
+
+    def test_transient_download_is_rescheduled_with_full_jitter(self):
+        self.downloader.download.return_value = ImageDownloadResult(
+            None,
+            "temporary network failure",
+            False,
+            ImageDownloadFailureKind.TRANSIENT_NETWORK,
+        )
+        self.repository.reschedule_for_retry.return_value = 3
+
+        with patch("app.worker.tasks.random.uniform", return_value=4.5) as uniform:
+            with self.assertRaises(Retry) as raised:
+                asyncio.run(process_analysis(self.ctx, 11))
+
+        self.repository.reschedule_for_retry.assert_awaited_once_with(
+            11, max_retry_count=4
+        )
+        uniform.assert_called_once_with(0, 8)
+        self.assertEqual(raised.exception.defer_score, 4500)
+        self.repository.mark_failed.assert_not_awaited()
+
+    def test_transient_failure_is_failed_after_four_retries_are_exhausted(self):
+        self.downloader.download.return_value = ImageDownloadResult(
+            None,
+            "temporary network failure",
+            False,
+            ImageDownloadFailureKind.TRANSIENT_NETWORK,
+        )
+        self.repository.reschedule_for_retry.return_value = None
+
+        with self.assertRaises(ImageDownloadFailure):
+            asyncio.run(process_analysis(self.ctx, 11))
+
+        kwargs = self.repository.mark_failed.await_args.kwargs
+        self.assertEqual(kwargs["error_code"], IMAGE_DOWNLOAD_ERROR)
+
+    def test_transient_ai_network_error_is_rescheduled(self):
+        import requests
+
+        local_path = self._temporary_file()
+        self.downloader.download.return_value = ImageDownloadResult(
+            local_path, None, True
+        )
+        self.diagnosis_service.diagnose_with_details.side_effect = requests.Timeout(
+            "provider timeout"
+        )
+
+        with patch("app.worker.tasks.random.uniform", return_value=1):
+            with self.assertRaises(Retry):
+                asyncio.run(process_analysis(self.ctx, 11))
+
+        self.repository.reschedule_for_retry.assert_awaited_once_with(
+            11, max_retry_count=4
+        )
+        self.repository.mark_failed.assert_not_awaited()
+        self.assertFalse(Path(local_path).exists())
+
+    def test_invalid_image_fails_without_retry(self):
+        self.downloader.download.return_value = ImageDownloadResult(
+            None,
+            "invalid image",
+            False,
+            ImageDownloadFailureKind.INVALID_IMAGE,
+        )
+
+        with self.assertRaises(ImageDownloadFailure):
+            asyncio.run(process_analysis(self.ctx, 11))
+
+        self.repository.reschedule_for_retry.assert_not_awaited()
+        self.assertEqual(
+            self.repository.mark_failed.await_args.kwargs["error_code"],
+            "INVALID_IMAGE_ERROR",
+        )
 
     def test_completion_storage_exception_uses_internal_code_and_reraises(self):
         local_path = self._temporary_file()
@@ -234,12 +325,29 @@ class WorkerLifecycleTest(unittest.TestCase):
         self.assertIs(ctx["diagnosis_service"], service)
         self.assertIs(ctx["session_factory"], session_factory)
         self.assertIs(ctx["image_downloader"], downloader.return_value)
+        downloader.assert_called_once_with(max_size_mb=10, timeout_seconds=10)
         self.assertEqual(ctx["model_version"], "v1")
 
         await shutdown(ctx)
 
         client.close.assert_called_once_with()
         engine.dispose.assert_awaited_once_with()
+
+    def test_ai_clients_disable_all_internal_retries(self):
+        client = Mock()
+        lm_one = Mock()
+        lm_two = Mock()
+        with patch("openai.OpenAI", return_value=client) as openai_client, patch(
+            "dspy.LM", side_effect=[lm_one, lm_two]
+        ) as lm, patch("dspy.load", return_value=Mock()):
+            returned_client, _ = build_ai_resources(self.settings)
+
+        self.assertIs(returned_client, client)
+        self.assertEqual(openai_client.call_args.kwargs["max_retries"], 0)
+        self.assertEqual(lm.call_count, 2)
+        for call in lm.call_args_list:
+            self.assertEqual(call.kwargs["num_retries"], 0)
+            self.assertEqual(call.kwargs["max_retries"], 0)
 
 
 if __name__ == "__main__":

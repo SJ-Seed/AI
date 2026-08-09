@@ -115,6 +115,39 @@ class AnalysisRepositoryTest(unittest.TestCase):
         self.assertFalse(result)
         self.repository.claim_pending.assert_awaited_once_with(7)
 
+    def test_reschedule_for_retry_atomically_increments_and_returns_count(self):
+        result = Mock()
+        result.scalar_one_or_none.return_value = 2
+        self.session.execute.return_value = result
+
+        retry_count = asyncio.run(
+            self.repository.reschedule_for_retry(7, max_retry_count=4)
+        )
+
+        self.assertEqual(retry_count, 2)
+        params = self._executed_params()
+        self.assertEqual(params["id_1"], 7)
+        self.assertEqual(params["status_1"], AnalysisStatus.PROCESSING)
+        self.assertEqual(params["retry_count_1"], 1)
+        self.assertEqual(params["retry_count_2"], 4)
+        self.assertEqual(params["status"], AnalysisStatus.PENDING)
+        self.assertIsNone(params["started_at"])
+        self.assertIsNone(params["error_code"])
+        self.session.commit.assert_awaited_once_with()
+
+    def test_reschedule_for_retry_returns_none_when_state_or_limit_rejects(self):
+        result = Mock()
+        result.scalar_one_or_none.return_value = None
+        self.session.execute.return_value = result
+
+        retry_count = asyncio.run(
+            self.repository.reschedule_for_retry(7, max_retry_count=4)
+        )
+
+        self.assertIsNone(retry_count)
+        self.session.rollback.assert_awaited_once_with()
+        self.session.commit.assert_not_awaited()
+
     def test_mark_completed_requires_processing_and_records_all_results(self):
         self._set_rowcounts(1)
 

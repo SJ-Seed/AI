@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 
 class WorkerSettingsTest(unittest.TestCase):
-    def test_worker_settings_register_single_non_retrying_analysis_worker(self):
+    def test_worker_settings_register_worker_with_five_total_attempts(self):
         environment = {
             "DATABASE_URL": "postgresql+asyncpg://database",
             "REDIS_URL": "redis://redis:6379/4",
@@ -22,8 +22,8 @@ class WorkerSettingsTest(unittest.TestCase):
         self.assertEqual(settings.queue_name, "analysis-test")
         self.assertEqual(settings.redis_settings.database, 4)
         self.assertEqual(settings.max_jobs, 1)
-        self.assertEqual(settings.max_tries, 1)
-        self.assertFalse(settings.retry_jobs)
+        self.assertEqual(settings.max_tries, 5)
+        self.assertTrue(settings.retry_jobs)
 
 
 if __name__ == "__main__":
