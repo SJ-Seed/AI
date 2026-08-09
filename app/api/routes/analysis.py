@@ -1,118 +1,107 @@
-from time import perf_counter
+"""분석 요청 접수 및 분석 결과 조회 API"""
 
-from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 
-from app.api.dependencies import (
-    get_analysis_repository,
-    get_diagnosis_service,
-    get_image_downloader,
-    get_model_version,
-)
-from app.api.schemas import AnalysisResponse, AnalyzeRequest
+from app.api.dependencies import get_analysis_queue, get_analysis_repository
+from app.api.schemas import AnalysisResponse, AnalyzeAcceptedResponse, AnalyzeRequest
+from app.application.ports.analysis_queue import AnalysisQueue
 from app.application.ports.analysis_repository import AnalysisRepository
-from app.application.services.diagnosis_service import DiagnosisService
 from app.core.logging import get_logger
-from app.infrastructure.image.image_downloader import ImageDownloader
+from app.domain.enums import AnalysisStatus
 
 
 router = APIRouter()
 logger = get_logger(__name__)
 
+QUEUE_ENQUEUE_ERROR_CODE = "QUEUE_ENQUEUE_FAILED"
+MAX_PERSISTED_ERROR_MESSAGE_LENGTH = 255
+SAFE_QUEUE_ERROR_MESSAGE = "Analysis queue is temporarily unavailable"
+
 
 # 분석 ID로 저장된 분석 이력 조회
-@router.get("/analyses/{analysis_id}", response_model=AnalysisResponse)
+@router.get(
+    "/analyses/{analysis_id}",
+    response_model=AnalysisResponse,
+    name="get_analysis_endpoint",
+)
 async def get_analysis_endpoint(
     analysis_id: int,
     repository: AnalysisRepository = Depends(get_analysis_repository),
 ) -> dict[str, object]:
+    # DB에서 분석 ID에 해당하는 분석 작업과 결과를 조회
     analysis = await repository.get_by_id(analysis_id)
     if analysis is None:
         raise HTTPException(status_code=404, detail="Analysis not found")
     return analysis
 
 
-@router.post("/analyze")
+# 분석 요청을 접수하고 비동기 큐에 등록
+@router.post(
+    "/analyze",
+    response_model=AnalyzeAcceptedResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
 async def analyze_endpoint(
     body: AnalyzeRequest,
-    service: DiagnosisService = Depends(get_diagnosis_service),
-    image_downloader: ImageDownloader = Depends(get_image_downloader),
+    response: Response,
     repository: AnalysisRepository = Depends(get_analysis_repository),
-    model_version: str | None = Depends(get_model_version),
-):
-    image_path = body.image_path
-    temperature = body.temperature
-    humidity = body.humidity
+    queue: AnalysisQueue = Depends(get_analysis_queue),
+) -> AnalyzeAcceptedResponse:
+    """
+    분석 요청을 접수하고 분석 ID를 Queue에 등록한다.
+    이 API에서는 이미지 다운로드나 AI 분석을 직접 실행하지 않는다.
+    """
 
+    # 1. 요청 정보를 PENDING 상태의 분석 작업으로 DB에 저장
     analysis_id = await repository.create(
-        image_path=image_path,
-        temperature=temperature,
-        humidity=humidity,
+        image_path=body.image_path,
+        temperature=body.temperature,
+        humidity=body.humidity,
     )
-    await repository.mark_processing(analysis_id)
-    started_at = perf_counter()
 
     try:
-        local_image_path, download_error = image_downloader.download(image_path)
-        if download_error is None:
-            outcome = service.diagnose_with_details(
-                local_image_path,
-                temperature,
-                humidity,
-            )
+        # 2. Worker가 처리할 수 있도록 큐에는 분석 ID만 등록
+        await queue.enqueue(analysis_id)
     except Exception as error:
+        # DB에 남아 있는 PENDING 작업을 FAILED 상태로 변경
+        logger.exception(
+            "Failed to enqueue analysis",
+            extra={"analysis_id": analysis_id},
+        )
         try:
-            await repository.mark_failed(
+            compensated = await repository.mark_enqueue_failed(
                 analysis_id,
-                error_code=type(error).__name__,
-                error_message=str(error),
+                error_code=QUEUE_ENQUEUE_ERROR_CODE,
+                error_message=SAFE_QUEUE_ERROR_MESSAGE[
+                    :MAX_PERSISTED_ERROR_MESSAGE_LENGTH
+                ],
             )
+            # 이미 상태가 바뀌었거나 작업을 찾지 못해 보성 처리 되지 않은 경우
+            if not compensated:
+                logger.error(
+                    "Analysis enqueue failure compensation was not applied",
+                    extra={"analysis_id": analysis_id},
+                )
         except Exception:
+            # 큐 등록 실패를 DB에 기록하는 작업까지 실패한 경우
             logger.exception(
-                "Failed to persist analysis failure",
+                "Failed to persist analysis enqueue failure",
                 extra={"analysis_id": analysis_id},
             )
-        raise
 
-    if download_error is not None:
-        await repository.mark_failed(
-            analysis_id,
-            error_code="IMAGE_DOWNLOAD_ERROR",
-            error_message=download_error,
-        )
-        return JSONResponse(content={"photo": download_error})
+        # 큐가 현재 요청을 받을 수 없으므로 503 반환
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Analysis queue unavailable",
+        ) from error
 
-    latency_ms = int((perf_counter() - started_at) * 1000)
-    await repository.mark_completed(
-        analysis_id,
-        is_plant=outcome.is_plant,
-        disease_code=outcome.disease_code,
-        disease_name=outcome.disease_name,
-        explain=outcome.explain,
-        cause=outcome.cause,
-        cure=outcome.cure,
-        model_version=model_version,
-        latency_ms=latency_ms,
+    # 3. 클라이언트가 분석 상태를 조회할 수 있는 API 주소 생성
+    status_url = f"/analyses/{analysis_id}"
+    response.headers["Location"] = status_url
+
+    # 4. 분석 완료를 기다리지 않고 접수 결과를 즉시 반환
+    return AnalyzeAcceptedResponse(
+        analysis_id=analysis_id,
+        status=AnalysisStatus.PENDING,
+        status_url=status_url,
     )
-
-    if outcome.is_plant is False:
-        return JSONResponse(content={
-            "photo": False,
-            "state": None,
-            "message": "식물이 잘 보이지 않아요. 다시 촬영해주세요!",
-        })
-    elif outcome.disease_code == "Healthy":
-        return JSONResponse(content={
-            "photo": True,
-            "state": "정상",
-            "message": "식물이 건강해요!",
-        })
-    else:
-        return JSONResponse(content={
-            "photo": True,
-            "state": outcome.disease_name,
-            "message": "식물이 아파요",
-            "explain": outcome.explain,
-            "cause": outcome.cause,
-            "cure": outcome.cure,
-        })

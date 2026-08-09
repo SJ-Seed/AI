@@ -1,79 +1,40 @@
-"""
-FastAPI 앱 생성 및 서버 초기화
-
-- 애플리케이션 생성
-- 라우터 등록
-- 서비스 및 AI 모델 초기화
-- 애플리케이션 생명주기 관리
-"""
+"""FastAPI application and Redis queue lifecycle."""
 
 from contextlib import asynccontextmanager
 
+from arq.connections import create_pool
 from fastapi import FastAPI
 
 from app.api.routes.analysis import router as analysis_router
 from app.api.routes.health import router as health_router
-from app.core.config import load_settings
+from app.core.config import load_settings, require_redis_url
+from app.infrastructure.queue.arq_analysis_queue import ArqAnalysisQueue
+from app.infrastructure.queue.redis_settings import build_redis_settings
 
-"""
-애플리케이션 시작 시 필요한 리소스 초기화
-"""
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    
-    import dspy
-    from openai import OpenAI
-
-    from app.application.services.diagnosis_service import DiagnosisService
-    from app.infrastructure.ai.disease_explainer import DspyDiseaseExplainer, GenerateAnswer
-    from app.infrastructure.ai.dspy_classifier import DspyDiseaseClassifier
-    from app.infrastructure.ai.openai_detector import OpenAIPlantDetector
-    from app.infrastructure.image.image_downloader import ImageDownloader
-
     settings = load_settings()
+    redis_url = require_redis_url(settings)
+    redis = await create_pool(build_redis_settings(redis_url))
 
-    # OpenAI API 클라이언트 생성
-    openai_client = OpenAI(api_key=settings.openai_api_key)
+    try:
+        app.state.analysis_queue = ArqAnalysisQueue(
+            redis,
+            settings.analysis_queue_name,
+        )
+        yield
+    finally:
+        await redis.aclose()
 
-    # 질병 분류에 사용할 DSPy 언어 모델 생성 (결과 일관성을 위해 temperature=0.0)
-    classifier_lm = dspy.LM(
-        model="gpt-4o",
-        api_key=settings.openai_api_key,
-        temperature=0.0,
-    )
 
-    # 질병 설명 생성에 사용할 DSPy 언어 모델 생성 (자연스러운 설명 생성을 위해 temperature=0.5)
-    explainer_lm = dspy.LM(
-        model="gpt-4o",
-        api_key=settings.openai_api_key,
-        temperature=0.5,
-    )
-
-    # 학습된 DSPy 프로그램 로드
-    compiled_program = dspy.load(str(settings.model_path))
-
-    # 애플리케이션 전역에서 사용할 서비스 생성
-    app.state.diagnosis_service = DiagnosisService(
-        detector=OpenAIPlantDetector(openai_client),
-        classifier=DspyDiseaseClassifier(compiled_program, classifier_lm),
-        explainer=DspyDiseaseExplainer(GenerateAnswer(), explainer_lm),
-    )
-
-    app.state.image_downloader = ImageDownloader()
-    app.state.model_version = settings.model_version or None
-    yield
-
-"""
-FaskAPI 애플리케이션을 생성하고 라우터 등록
-"""
 def create_app() -> FastAPI:
     application = FastAPI(lifespan=lifespan)
-    # 분석 API 등록
     application.include_router(analysis_router)
     application.include_router(health_router)
     return application
 
-# 애플리케이션 생성
+
 app = create_app()
 
 
