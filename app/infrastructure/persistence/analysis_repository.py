@@ -2,6 +2,7 @@
 
 from datetime import datetime, timezone
 
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.ports.analysis_repository import AnalysisRepository
@@ -45,14 +46,150 @@ class SqlAlchemyAnalysisRepository(AnalysisRepository):
 
     # 분석이 실제로 시작되었음을 기록
     async def mark_processing(self, analysis_id: int) -> bool:
-        analysis = await self.session.get(Analysis, analysis_id)
-        if analysis is None:
-            return False
+        """Compatibility wrapper for the current synchronous API."""
+        return await self.claim_pending(analysis_id)
 
-        analysis.status = AnalysisStatus.PROCESSING
-        analysis.started_at = datetime.now(timezone.utc)
-        await self._commit()
-        return True
+    # PENDING 상태의 분석 작업을 원자적으로 선점
+    async def claim_pending(self, analysis_id: int) -> bool:
+        now = datetime.now(timezone.utc)
+        statement = (
+            update(Analysis)
+            .where(
+                Analysis.id == analysis_id,
+                Analysis.status == AnalysisStatus.PENDING,
+            )
+            .values(
+                status=AnalysisStatus.PROCESSING,
+                started_at=now,
+                enqueued_at=func.coalesce(Analysis.enqueued_at, now),
+                enqueue_claimed_at=None,
+            )
+        )
+        return await self._execute_transition(statement)
+
+    async def claim_pending_or_stale(
+        self, analysis_id: int, *, stale_before: datetime
+    ) -> bool:
+        now = datetime.now(timezone.utc)
+        statement = (
+            update(Analysis)
+            .where(
+                Analysis.id == analysis_id,
+                or_(
+                    Analysis.status == AnalysisStatus.PENDING,
+                    and_(
+                        Analysis.status == AnalysisStatus.PROCESSING,
+                        or_(
+                            Analysis.started_at.is_(None),
+                            Analysis.started_at <= stale_before,
+                        ),
+                    ),
+                ),
+            )
+            .values(
+                status=AnalysisStatus.PROCESSING,
+                started_at=now,
+                enqueued_at=func.coalesce(Analysis.enqueued_at, now),
+                enqueue_claimed_at=None,
+            )
+        )
+        return await self._execute_transition(statement)
+
+    # 일시적 오류가 발생한 분석 작업을 재시도 대기 상태로 변경
+    async def reschedule_for_retry(
+        self, analysis_id: int, *, max_retry_count: int
+    ) -> int | None:
+        statement = (
+            update(Analysis)
+            .where(
+                Analysis.id == analysis_id,
+                Analysis.status == AnalysisStatus.PROCESSING,
+                Analysis.retry_count < max_retry_count,
+            )
+            .values(
+                status=AnalysisStatus.PENDING,
+                retry_count=Analysis.retry_count + 1,
+                started_at=None,
+                completed_at=None,
+                error_code=None,
+                error_message=None,
+            )
+            .returning(Analysis.retry_count)
+        )
+        try:
+            result = await self.session.execute(statement)
+            retry_count = result.scalar_one_or_none()
+            if retry_count is None:
+                await self.session.rollback()
+                return None
+            await self.session.commit()
+            return int(retry_count)
+        except Exception:
+            await self.session.rollback()
+            raise
+
+    async def mark_enqueued(self, analysis_id: int) -> bool:
+        statement = (
+            update(Analysis)
+            .where(
+                Analysis.id == analysis_id,
+                Analysis.enqueued_at.is_(None),
+            )
+            .values(
+                enqueued_at=datetime.now(timezone.utc),
+                enqueue_claimed_at=None,
+            )
+        )
+        return await self._execute_transition(statement)
+
+    async def claim_unenqueued_pending(
+        self,
+        *,
+        created_before: datetime,
+        claim_stale_before: datetime,
+        limit: int,
+    ) -> list[int]:
+        candidates = (
+            select(Analysis.id)
+            .where(
+                Analysis.status == AnalysisStatus.PENDING,
+                Analysis.enqueued_at.is_(None),
+                Analysis.created_at <= created_before,
+                or_(
+                    Analysis.enqueue_claimed_at.is_(None),
+                    Analysis.enqueue_claimed_at <= claim_stale_before,
+                ),
+            )
+            .order_by(Analysis.id)
+            .limit(limit)
+            .with_for_update(skip_locked=True)
+        )
+        statement = (
+            update(Analysis)
+            .where(Analysis.id.in_(candidates))
+            .values(enqueue_claimed_at=datetime.now(timezone.utc))
+            .returning(Analysis.id)
+        )
+        try:
+            result = await self.session.execute(statement)
+            analysis_ids = list(result.scalars().all())
+            await self.session.commit()
+            return analysis_ids
+        except Exception:
+            await self.session.rollback()
+            raise
+
+    async def release_enqueue_claim(self, analysis_id: int) -> bool:
+        statement = (
+            update(Analysis)
+            .where(
+                Analysis.id == analysis_id,
+                Analysis.enqueued_at.is_(None),
+                Analysis.enqueue_claimed_at.is_not(None),
+            )
+            .values(enqueue_claimed_at=None)
+        )
+        return await self._execute_transition(statement)
 
     # 분석이 성공적으로 완료되었을 때 결과 저장
     async def mark_completed(
@@ -68,23 +205,45 @@ class SqlAlchemyAnalysisRepository(AnalysisRepository):
         model_version: str | None = None,
         latency_ms: int | None = None,
     ) -> bool:
-        analysis = await self.session.get(Analysis, analysis_id)
-        if analysis is None:
-            return False
+        """
+        처리 중인 분석 작업의 결과를 저장하고 COMPLETED 상태로 변경한다.
+        PROCESSING 상태인 작업만 완료 처리할 수 있으며, 분석 결과와 완료 시각을 하나의 조건부 UPDATE로 저장한다.
 
-        # 분석 상태를 완료로 변경
-        analysis.status = AnalysisStatus.COMPLETED
-        analysis.is_plant = is_plant
-        analysis.disease_code = disease_code
-        analysis.disease_name = disease_name
-        analysis.explain = explain
-        analysis.cause = cause
-        analysis.cure = cure
-        analysis.model_version = model_version
-        analysis.latency_ms = latency_ms
-        analysis.completed_at = datetime.now(timezone.utc)
-        await self._commit()
-        return True
+        Args:
+            analysis_id: 완료 처리할 분석 작업의 ID
+            is_plant: 이미지의 식물 여부
+            disease_code: 진단된 질병 코드
+            disease_name: 진단된 질병 이름
+            explain: 분석 결과 설명
+            cause: 질병의 원인
+            cure: 질병의 치료 또는 관리 방법
+            model_version: 분석에 사용된 AI 모델 버전
+            latency_ms: 분석 처리에 걸린 시간(ms)
+
+        Returns:
+            PROCESSING에서 COMPLETED로 변경되면 True,
+            작업이 없거나 PROCESSING 상태가 아니면 False
+        """
+        statement = (
+            update(Analysis)
+            .where(
+                Analysis.id == analysis_id,
+                Analysis.status == AnalysisStatus.PROCESSING,
+            )
+            .values(
+                status=AnalysisStatus.COMPLETED,
+                is_plant=is_plant,
+                disease_code=disease_code,
+                disease_name=disease_name,
+                explain=explain,
+                cause=cause,
+                cure=cure,
+                model_version=model_version,
+                latency_ms=latency_ms,
+                completed_at=datetime.now(timezone.utc),
+            )
+        )
+        return await self._execute_transition(statement)
 
     # 분석이 실패했을 때 실패 상태와 오류 정보 저장
     async def mark_failed(
@@ -94,16 +253,93 @@ class SqlAlchemyAnalysisRepository(AnalysisRepository):
         error_code: str,
         error_message: str,
     ) -> bool:
-        analysis = await self.session.get(Analysis, analysis_id)
-        if analysis is None:
-            return False
+        """
+        Worker가 처리 중인 분석을 FAILED 상태로 변경한다.
+        Worker가 선점한 PROCESSING 상태의 작업에만 적용된다.
+        """
+        return await self._mark_failed_from(
+            analysis_id,
+            expected_status=AnalysisStatus.PROCESSING,
+            error_code=error_code,
+            error_message=error_message,
+        )
 
-        analysis.status = AnalysisStatus.FAILED
-        analysis.error_code = error_code
-        analysis.error_message = error_message
-        analysis.completed_at = datetime.now(timezone.utc)
-        await self._commit()
-        return True
+    async def mark_enqueue_failed(
+        self,
+        analysis_id: int,
+        *,
+        error_code: str,
+        error_message: str,
+    ) -> bool:
+        """
+        Queue 등록에 실패한 분석을 FAILED 상태로 변경한다.
+        Worker가 아직 선점하지 않은 PENDING 상태의 작업에만 적용된다.
+        """
+        return await self._mark_failed_from(
+            analysis_id,
+            expected_status=AnalysisStatus.PENDING,
+            error_code=error_code,
+            error_message=error_message,
+        )
+
+    async def _mark_failed_from(
+        self,
+        analysis_id: int,
+        *,
+        expected_status: AnalysisStatus,
+        error_code: str,
+        error_message: str,
+    ) -> bool:
+        """
+        지정된 상태의 분석을 FAILED로 변경하고 오류 정보를 저장한다.
+
+        Args:
+            analysis_id: 실패 처리할 분석 작업의 ID
+            expected_status: 실패 처리를 허용할 현재 상태
+            error_code: 실패 원인을 구분하는 오류 코드
+            error_message: 실패 원인에 대한 상세 메시지
+
+        Returns:
+            FAILED 상태 변경에 성공하면 True, 작업이 없거나 예상한 상태가 아니면 False
+        """
+        statement = (
+            update(Analysis)
+            .where(
+                Analysis.id == analysis_id,
+                Analysis.status == expected_status,
+            )
+            .values(
+                status=AnalysisStatus.FAILED,
+                error_code=error_code,
+                error_message=error_message,
+                completed_at=datetime.now(timezone.utc),
+            )
+        )
+        return await self._execute_transition(statement)
+
+    async def _execute_transition(self, statement) -> bool:
+        """
+        상태 전이 UPDATE를 실행하고 성공 여부를 반환한다.
+        한 행만 변경된 경우 상태 전이에 성공한 것으로 판단한다.
+        대상이 없거나 상태 조건이 맞지 않으면 변경하지 않고 False를 반환한다.
+        실행 또는 commit 중 예외가 발생하면 rollback한 뒤 예외를 전파한다.
+
+        Args:
+            statement: 실행할 SQLAlchemy UPDATE 문
+
+        Returns:
+            정확히 한 행이 변경되면 True, 그렇지 않으면 False
+        """
+        try:
+            result = await self.session.execute(statement)
+            if result.rowcount != 1:
+                await self.session.rollback()
+                return False
+            await self.session.commit()
+            return True
+        except Exception:
+            await self.session.rollback()
+            raise
 
     # DB 변경사항을 확정하는 공통 메서드
     async def _commit(self) -> None:
@@ -135,5 +371,7 @@ class SqlAlchemyAnalysisRepository(AnalysisRepository):
             "error_message": analysis.error_message,
             "created_at": analysis.created_at,
             "started_at": analysis.started_at,
+            "enqueued_at": analysis.enqueued_at,
+            "enqueue_claimed_at": analysis.enqueue_claimed_at,
             "completed_at": analysis.completed_at,
         }

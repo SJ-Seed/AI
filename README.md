@@ -54,20 +54,19 @@
 - SQLAlchemy 2.x (Async)
 - Alembic
 
-### Database
+### Database & Queue
 
 - PostgreSQL
 - asyncpg
-
-### AI
-
-- DSPy
-- OpenAI GPT-4o
-- Compiled DSPy Classifier
+- Redis 7
+- arq
 
 ### Infrastructure
 
 - Docker / Docker Compose
+- FastAPI API Container
+- arq Worker Container
+- Redis Queue
 - AWS EC2
 - Amazon S3
 - GitHub Container Registry (GHCR)
@@ -89,7 +88,7 @@
 
 - Docker Compose v2가 설치되어 있어야 합니다.
 - 프로젝트 루트에 학습된 DSPy 모델 디렉터리인 `compiled_leaf_disease/`가 있어야 합니다.
-- `.env.example`을 복사하여 `.env` 파일을 만들고 `OPENAI_API_KEY`를 설정합니다.
+- `.env.example`을 복사하여 `.env` 파일을 만들고 `OPENAI_API_KEY`, PostgreSQL, Redis 연결 정보를 설정합니다.
 
 > `.env`에는 API 키와 같은 민감한 값이 포함되므로 Docker 이미지에 포함하거나 Git에 커밋하지 마세요.
 
@@ -127,6 +126,8 @@ docker compose up -d
 ### Docker 명령으로 직접 실행
 
 Docker Compose 없이 실행하려면 다음 명령을 사용합니다.
+
+이 경우 컨테이너에서 접근할 수 있는 PostgreSQL과 Redis가 별도로 실행 중이어야 합니다.
 
 ```bash
 docker build -t sjseed-ai .
@@ -188,6 +189,9 @@ AWS와 GitHub Actions를 기반으로 Docker 이미지 빌드부터 EC2 배포�
 | Ubuntu                                           |
 | Docker / Docker Compose                          |
 | FastAPI Container                                |
+| arq Worker Container                             |
+| PostgreSQL                                       |
+| Redis Queue                                      |
 +--------------------------------------------------+
                        │
                        ▼
@@ -217,3 +221,36 @@ Health Check
 ```
 
 배포된 애플리케이션의 상태는 `/health` 엔드포인트를 통해 확인합니다.
+
+<br/>
+
+## ⚙️ 비동기 AI 분석 구조
+
+AI 분석은 HTTP 요청에서 직접 실행하지 않고 Redis Queue와 별도 Worker를 통해 비동기로 처리합니다.
+
+1. FastAPI가 분석 요청을 DB에 `PENDING` 상태로 저장합니다.
+2. Redis Queue에 `analysis_id`를 등록합니다.
+3. API는 분석 완료를 기다리지 않고 `202 Accepted`를 반환합니다.
+4. Worker가 작업을 가져와 `PROCESSING` 상태로 변경합니다.
+5. 이미지 다운로드와 AI 분석을 수행합니다.
+6. 성공하면 `COMPLETED`, 재시도할 수 있는 오류가 발생하면 `PENDING` 상태로 되돌린 뒤 다시 처리합니다.
+7. 재시도할 수 없는 오류가 발생하거나 최대 재시도 횟수를 모두 소진하면 `FAILED` 상태로 저장합니다.
+
+```text
+Client
+  │ POST /analyze
+  ▼
+FastAPI ── 작업 생성 ──▶ PostgreSQL
+  │
+  ├── 202 Accepted ──▶ Client
+  │
+  └── analysis_id ──▶ Redis Queue
+                           │
+                           ▼
+                       arq Worker
+                           │
+                이미지 다운로드·AI 분석
+                           │
+                           ▼
+                       PostgreSQL
+```

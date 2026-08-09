@@ -98,10 +98,10 @@ jobs:
 
             git pull --ff-only origin main
 
-            docker compose pull ai
+            docker compose pull ai worker
             docker compose up -d postgres
             docker compose run --rm ai alembic upgrade head
-            docker compose up -d --no-build ai
+            docker compose up -d --no-build ai worker
 
             health_check_succeeded=false
 

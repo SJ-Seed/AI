@@ -10,13 +10,13 @@ if __package__ is None or __package__ == "":
     sys.path.insert(0, str(project_root))
     
 import dspy
-from app.core.config import load_settings
+from app.core.config import load_settings, require_openai_api_key
 from dspy.teleprompt import MIPROv2
 from dspy.evaluate import Evaluate
 from scripts.make_dataset import build_datasets
 
 """ #0. DSPy 초기 설정 """
-api_key = load_settings().openai_api_key
+api_key = require_openai_api_key(load_settings())
 model = dspy.LM(model="gpt-4o", api_key=api_key, temperature=0)
 dspy.settings.configure(lm=model)
 

@@ -7,6 +7,7 @@ annotated-types==0.7.0
 anyio==4.11.0
 argon2-cffi==25.1.0
 argon2-cffi-bindings==25.1.0
+arq==0.28.0
 arrow==1.4.0
 asttokens==3.0.0
 async-lru==2.0.5
