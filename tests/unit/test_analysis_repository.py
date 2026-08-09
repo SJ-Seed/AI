@@ -95,6 +95,21 @@ class AnalysisRepositoryTest(unittest.TestCase):
         self.session.commit.assert_not_awaited()
         self.session.rollback.assert_awaited_once_with()
 
+    def test_claim_pending_or_stale_reclaims_expired_processing_analysis(self):
+        self._set_rowcounts(1)
+        stale_before = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+        result = asyncio.run(
+            self.repository.claim_pending_or_stale(7, stale_before=stale_before)
+        )
+
+        self.assertTrue(result)
+        params = self._executed_params()
+        self.assertIn(AnalysisStatus.PENDING, params.values())
+        self.assertIn(AnalysisStatus.PROCESSING, params.values())
+        self.assertIn(stale_before, params.values())
+        self.session.commit.assert_awaited_once_with()
+
     def test_only_first_of_two_claims_succeeds(self):
         self._set_rowcounts(1, 0)
 

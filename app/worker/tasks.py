@@ -2,6 +2,7 @@
 
 import asyncio
 import random
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from time import perf_counter
 from typing import Any
@@ -13,6 +14,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from app.application.services.diagnosis_service import DiagnosisService
 from app.core.config import Settings, load_settings, require_openai_api_key
 from app.core.logging import get_logger
+from app.domain.enums import AnalysisStatus
 from app.infrastructure.image.image_downloader import (
     ImageDownloader,
     ImageDownloadFailureKind,
@@ -145,7 +147,7 @@ async def process_analysis(ctx: dict[str, Any], analysis_id: int) -> bool:
     Queue에서 전달받은 분석 ID에 해당하는 작업을 처리한다.
 
     처리 흐름:
-        PENDING 작업 선점
+        PENDING 또는 lease가 만료된 PROCESSING 작업 선점
         → 이미지 다운로드
         → AI 분석
         → 결과 저장
@@ -156,10 +158,10 @@ async def process_analysis(ctx: dict[str, Any], analysis_id: int) -> bool:
     """
     session_factory = ctx["session_factory"]
 
-    # PENDING 작업을 PROCESSING으로 변경하고 입력 데이터 조회
-    analysis = await _claim_and_load(session_factory, analysis_id)
+    # PENDING 또는 lease가 만료된 PROCESSING 작업을 선점하고 입력 데이터 조회
+    analysis = await _claim_and_load(ctx, analysis_id)
 
-    # 다른 Worker가 이미 선점되었거나 처리된 작업이면 중복 처리하지 않음
+    # 이미 완료되었거나 실패한 작업이면 중복 처리하지 않음
     if analysis is None:
         logger.info(
             "Analysis was already claimed or is no longer pending",
@@ -266,19 +268,27 @@ async def process_analysis(ctx: dict[str, Any], analysis_id: int) -> bool:
         _remove_owned_temporary_file(download_result, analysis_id)
 
 
-async def _claim_and_load(session_factory, analysis_id: int):
+async def _claim_and_load(ctx: dict[str, Any], analysis_id: int):
     """
-    PENDING 작업을 원자적으로 선점하고 분석 입력 데이터를 조회한다.
-    선점에 실패하면 다른 Worker가 이미 처리 중인 것으로 보고 None을 반환한다.
+    PENDING 또는 lease가 만료된 PROCESSING 작업을 원자적으로 선점한다.
+    다른 Worker의 lease가 유효하면 lease 만료 시점까지 처리를 연기한다.
     """
+    session_factory = ctx["session_factory"]
+    settings: Settings = ctx["settings"]
+    now = datetime.now(timezone.utc)
+    stale_before = now - timedelta(seconds=settings.processing_timeout_seconds)
     claimed = False
+    analysis = None
     try:
         async with session_factory() as session:
             repository = SqlAlchemyAnalysisRepository(session)
-            claimed = await repository.claim_pending(analysis_id)
+            claimed = await repository.claim_pending_or_stale(
+                analysis_id, stale_before=stale_before
+            )
             if not claimed:
-                return None
-            analysis = await repository.get_by_id(analysis_id)
+                analysis = await repository.get_by_id(analysis_id)
+            else:
+                analysis = await repository.get_by_id(analysis_id)
     except Exception:
         logger.exception(
             "Failed while claiming or loading analysis",
@@ -288,6 +298,24 @@ async def _claim_and_load(session_factory, analysis_id: int):
         if claimed:
             await _persist_failure(session_factory, analysis_id, WORKER_INTERNAL_ERROR)
         raise
+
+    if not claimed:
+        if analysis is not None and analysis["status"] == AnalysisStatus.PROCESSING:
+            started_at = analysis.get("started_at")
+            if started_at is not None and started_at.tzinfo is None:
+                started_at = started_at.replace(tzinfo=timezone.utc)
+            retry_at = (
+                started_at + timedelta(seconds=settings.processing_timeout_seconds)
+                if started_at is not None
+                else now + timedelta(seconds=settings.processing_timeout_seconds)
+            )
+            delay = max(1.0, (retry_at - now).total_seconds())
+            logger.info(
+                "Analysis is still leased by another worker; deferring delivery",
+                extra={"analysis_id": analysis_id, "retry_delay_seconds": delay},
+            )
+            raise Retry(defer=delay)
+        return None
 
     # 선점은 성공했지만 데이터를 조회하지 못한 비정상 상황
     if analysis is None:

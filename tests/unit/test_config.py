@@ -49,12 +49,14 @@ class SettingsTest(unittest.TestCase):
         self.assertEqual(settings.retry_base_delay_seconds, 2)
         self.assertEqual(settings.retry_max_delay_seconds, 60)
         self.assertEqual(settings.image_download_timeout_seconds, 10)
+        self.assertEqual(settings.processing_timeout_seconds, 300)
 
     def test_invalid_worker_limits_are_rejected(self):
         invalid_values = (
             {"MAX_RETRY_COUNT": "-1"},
             {"MAX_IMAGE_SIZE_MB": "0"},
             {"IMAGE_DOWNLOAD_TIMEOUT_SECONDS": "0"},
+            {"PROCESSING_TIMEOUT_SECONDS": "0"},
             {"RETRY_BASE_DELAY_SECONDS": "3", "RETRY_MAX_DELAY_SECONDS": "2"},
         )
         for values in invalid_values:

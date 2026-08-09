@@ -2,7 +2,7 @@
 
 from datetime import datetime, timezone
 
-from sqlalchemy import update
+from sqlalchemy import and_, or_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.ports.analysis_repository import AnalysisRepository
@@ -56,6 +56,31 @@ class SqlAlchemyAnalysisRepository(AnalysisRepository):
             .where(
                 Analysis.id == analysis_id,
                 Analysis.status == AnalysisStatus.PENDING,
+            )
+            .values(
+                status=AnalysisStatus.PROCESSING,
+                started_at=datetime.now(timezone.utc),
+            )
+        )
+        return await self._execute_transition(statement)
+
+    async def claim_pending_or_stale(
+        self, analysis_id: int, *, stale_before: datetime
+    ) -> bool:
+        statement = (
+            update(Analysis)
+            .where(
+                Analysis.id == analysis_id,
+                or_(
+                    Analysis.status == AnalysisStatus.PENDING,
+                    and_(
+                        Analysis.status == AnalysisStatus.PROCESSING,
+                        or_(
+                            Analysis.started_at.is_(None),
+                            Analysis.started_at <= stale_before,
+                        ),
+                    ),
+                ),
             )
             .values(
                 status=AnalysisStatus.PROCESSING,

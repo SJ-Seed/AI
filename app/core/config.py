@@ -21,6 +21,7 @@ class Settings:
     retry_base_delay_seconds: float = 2
     retry_max_delay_seconds: float = 60
     image_download_timeout_seconds: float = 10
+    processing_timeout_seconds: float = 300
 
 
 def load_settings() -> Settings:
@@ -41,6 +42,7 @@ def load_settings() -> Settings:
         retry_base_delay_seconds=float(os.getenv("RETRY_BASE_DELAY_SECONDS", "2")),
         retry_max_delay_seconds=float(os.getenv("RETRY_MAX_DELAY_SECONDS", "60")),
         image_download_timeout_seconds=float(os.getenv("IMAGE_DOWNLOAD_TIMEOUT_SECONDS", "10")),
+        processing_timeout_seconds=float(os.getenv("PROCESSING_TIMEOUT_SECONDS", "300")),
     )
     if settings.max_retry_count < 0:
         raise RuntimeError("MAX_RETRY_COUNT must be non-negative")
@@ -52,6 +54,8 @@ def load_settings() -> Settings:
         raise RuntimeError("RETRY_MAX_DELAY_SECONDS must be >= RETRY_BASE_DELAY_SECONDS")
     if settings.image_download_timeout_seconds <= 0:
         raise RuntimeError("IMAGE_DOWNLOAD_TIMEOUT_SECONDS must be positive")
+    if settings.processing_timeout_seconds <= 0:
+        raise RuntimeError("PROCESSING_TIMEOUT_SECONDS must be positive")
     return settings
 
 

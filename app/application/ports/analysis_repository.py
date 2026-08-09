@@ -1,5 +1,6 @@
 """Application 계층에서 분석 작업의 저장/조회에 사용하기 위한 Repository 인터페이스"""
 
+from datetime import datetime
 from typing import Protocol
 
 
@@ -31,6 +32,12 @@ class AnalysisRepository(Protocol):
     # PENDING 상태의 분석 작업을 원자적으로 선점
     async def claim_pending(self, analysis_id: int) -> bool:
         """Atomically change a pending analysis to processing."""
+        ...
+
+    async def claim_pending_or_stale(
+        self, analysis_id: int, *, stale_before: datetime
+    ) -> bool:
+        """Claim a pending analysis or reclaim an expired processing analysis."""
         ...
 
     # 일시적 오류가 발생한 분석 작업을 재시도 대기 상태로 변경

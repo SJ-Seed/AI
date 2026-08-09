@@ -2,11 +2,13 @@ import asyncio
 import tempfile
 import unittest
 from pathlib import Path
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, Mock, patch
 
 from arq import Retry
 
 from app.core.config import Settings
+from app.domain.enums import AnalysisStatus
 from app.domain.models import DiagnosisOutcome
 from app.infrastructure.image.image_downloader import (
     ImageDownloadFailureKind,
@@ -42,8 +44,11 @@ class WorkerTaskTest(unittest.TestCase):
     def setUp(self):
         self.repository = Mock()
         self.repository.claim_pending = AsyncMock(return_value=True)
+        self.repository.claim_pending_or_stale = AsyncMock(return_value=True)
         self.repository.get_by_id = AsyncMock(return_value={
             "id": 11,
+            "status": AnalysisStatus.PENDING,
+            "started_at": None,
             "image_path": "https://example/image.jpg",
             "temperature": "28",
             "humidity": "85",
@@ -88,16 +93,36 @@ class WorkerTaskTest(unittest.TestCase):
         self.repository_patch.stop()
 
     def test_unclaimed_analysis_is_skipped(self):
-        self.repository.claim_pending.return_value = False
+        self.repository.claim_pending_or_stale.return_value = False
+        self.repository.get_by_id.return_value = {
+            "id": 11,
+            "status": AnalysisStatus.COMPLETED,
+            "started_at": datetime.now(timezone.utc),
+        }
 
         result = asyncio.run(process_analysis(self.ctx, 11))
 
         self.assertFalse(result)
-        self.repository.get_by_id.assert_not_awaited()
+        self.repository.get_by_id.assert_awaited_once_with(11)
         self.downloader.download.assert_not_called()
         self.diagnosis_service.diagnose_with_details.assert_not_called()
         self.repository.mark_completed.assert_not_awaited()
         self.repository.mark_failed.assert_not_awaited()
+
+    def test_active_processing_analysis_is_deferred_until_lease_expires(self):
+        self.repository.claim_pending_or_stale.return_value = False
+        self.repository.get_by_id.return_value = {
+            "id": 11,
+            "status": AnalysisStatus.PROCESSING,
+            "started_at": datetime.now(timezone.utc),
+        }
+
+        with self.assertRaises(Retry) as raised:
+            asyncio.run(process_analysis(self.ctx, 11))
+
+        self.assertGreater(raised.exception.defer_score, 290_000)
+        self.assertLessEqual(raised.exception.defer_score, 300_000)
+        self.downloader.download.assert_not_called()
 
     def test_success_completes_analysis_and_removes_owned_temporary_file(self):
         path = self._temporary_file()
