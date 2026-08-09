@@ -59,15 +59,19 @@
 - PostgreSQL
 - asyncpg
 
-### AI
+### Database & Queue
 
-- DSPy
-- OpenAI GPT-4o
-- Compiled DSPy Classifier
+- PostgreSQL
+- asyncpg
+- Redis 7
+- arq
 
 ### Infrastructure
 
 - Docker / Docker Compose
+- FastAPI API Container
+- arq Worker Container
+- Redis Queue
 - AWS EC2
 - Amazon S3
 - GitHub Container Registry (GHCR)
@@ -217,3 +221,35 @@ Health Check
 ```
 
 배포된 애플리케이션의 상태는 `/health` 엔드포인트를 통해 확인합니다.
+
+<br/>
+
+## ⚙️ 비동기 AI 분석 구조
+
+AI 분석은 HTTP 요청에서 직접 실행하지 않고 Redis Queue와 별도 Worker를 통해 비동기로 처리합니다.
+
+1. FastAPI가 분석 요청을 DB에 `PENDING` 상태로 저장합니다.
+2. Redis Queue에 `analysis_id`를 등록합니다.
+3. API는 분석 완료를 기다리지 않고 `202 Accepted`를 반환합니다.
+4. Worker가 작업을 가져와 `PROCESSING` 상태로 변경합니다.
+5. 이미지 다운로드와 AI 분석을 수행합니다.
+6. 성공하면 `COMPLETED`, 실패하면 `FAILED` 상태로 결과를 저장합니다.
+
+```text
+Client
+  │ POST /analyze
+  ▼
+FastAPI ── 작업 생성 ──▶ PostgreSQL
+  │
+  ├── 202 Accepted ──▶ Client
+  │
+  └── analysis_id ──▶ Redis Queue
+                           │
+                           ▼
+                       arq Worker
+                           │
+                이미지 다운로드·AI 분석
+                           │
+                           ▼
+                       PostgreSQL
+```
