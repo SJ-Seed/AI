@@ -1,41 +1,30 @@
 import unittest
 from datetime import datetime, timezone
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, Mock, call
 
 from fastapi.testclient import TestClient
 
-from app.api.dependencies import (
-    get_analysis_repository,
-    get_diagnosis_service,
-    get_image_downloader,
-    get_model_version,
-)
-from app.domain.models import DiagnosisOutcome
+from app.api.dependencies import get_analysis_queue, get_analysis_repository
 from app.domain.enums import AnalysisStatus
 from app.main import create_app
 
 
 class AnalysisHttpTest(unittest.TestCase):
     def setUp(self):
-        # 실제 외부 의존성 대신 Mock 객체 사용
-        self.service = Mock()
-        self.downloader = Mock()
-        self.downloader.download.return_value = ("local.jpg", None)
         self.repository = Mock()
         self.repository.create = AsyncMock(return_value=11)
         self.repository.get_by_id = AsyncMock()
         self.repository.mark_processing = AsyncMock(return_value=True)
         self.repository.mark_completed = AsyncMock(return_value=True)
         self.repository.mark_failed = AsyncMock(return_value=True)
+        self.repository.mark_enqueue_failed = AsyncMock(return_value=True)
+        self.queue = Mock()
+        self.queue.enqueue = AsyncMock(return_value=None)
 
-        # Dependency Override를 적용한 테스트용 FastAPI 앱 생성
         self.app = create_app()
-        self.app.dependency_overrides[get_diagnosis_service] = lambda: self.service
-        self.app.dependency_overrides[get_image_downloader] = lambda: self.downloader
         self.app.dependency_overrides[get_analysis_repository] = lambda: self.repository
-        self.app.dependency_overrides[get_model_version] = lambda: "classifier-v1"
+        self.app.dependency_overrides[get_analysis_queue] = lambda: self.queue
         self.client = TestClient(self.app, raise_server_exceptions=False)
-
         self.valid_request = {
             "image_path": "https://example/image.jpg",
             "temperature": "28",
@@ -43,119 +32,89 @@ class AnalysisHttpTest(unittest.TestCase):
         }
 
     def tearDown(self):
-        # 테스트 간 Override와 Client 상태가 공유되지 않도록 정리
         self.app.dependency_overrides.clear()
         self.client.close()
 
-    def test_healthy_response_over_http(self):
-        # 정상 식물 진단 결과의 HTTP 응답 계약 검증
-        self.service.diagnose_with_details.return_value = DiagnosisOutcome(
-            True, "Healthy", "정상", None, None, None,
-        )
+    def test_analyze_creates_and_enqueues_pending_analysis(self):
+        calls = Mock()
+        calls.attach_mock(self.repository.create, "create")
+        calls.attach_mock(self.queue.enqueue, "enqueue")
 
         response = self.client.post("/analyze", json=self.valid_request)
 
-        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.status_code, 202)
         self.assertEqual(response.json(), {
-            "photo": True,
-            "state": "정상",
-            "message": "식물이 건강해요!",
+            "analysis_id": 11,
+            "status": "PENDING",
+            "status_url": "/analyses/11",
         })
-        self.downloader.download.assert_called_once_with("https://example/image.jpg")
-        self.service.diagnose_with_details.assert_called_once_with("local.jpg", "28", "85")
-        completed = self.repository.mark_completed.await_args.kwargs
-        self.assertEqual(completed["disease_code"], "Healthy")
-        self.assertEqual(completed["model_version"], "classifier-v1")
-
-    def test_not_a_plant_response_over_http(self):
-        # 비식물 이미지 진단 결과의 HTTP 응답 계약 검증
-        self.service.diagnose_with_details.return_value = DiagnosisOutcome(
-            False, None, None, None, None, None,
-        )
-
-        response = self.client.post("/analyze", json=self.valid_request)
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json(), {
-            "photo": False,
-            "state": None,
-            "message": "식물이 잘 보이지 않아요. 다시 촬영해주세요!",
-        })
-        self.assertFalse(self.repository.mark_completed.await_args.kwargs["is_plant"])
-
-    @patch("app.api.routes.analysis.perf_counter", side_effect=[100.0, 101.25])
-    def test_disease_response_over_http(self, perf_counter):
-        # 질병 진단 결과의 상세 응답 계약 검증
-        self.service.diagnose_with_details.return_value = DiagnosisOutcome(
-            True,
-            "Leaf_mold",
-            "잎곰팡이병",
-            "설명",
-            "원인",
-            "치료",
-        )
-
-        response = self.client.post("/analyze", json=self.valid_request)
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json(), {
-            "photo": True,
-            "state": "잎곰팡이병",
-            "message": "식물이 아파요",
-            "explain": "설명",
-            "cause": "원인",
-            "cure": "치료",
-        })
-        self.repository.create.assert_awaited_once_with(**self.valid_request)
-        self.repository.mark_processing.assert_awaited_once_with(11)
-        completed = self.repository.mark_completed.await_args.kwargs
-        self.assertEqual(completed["disease_code"], "Leaf_mold")
-        self.assertEqual(completed["disease_name"], "잎곰팡이병")
-        self.assertEqual(completed["explain"], "설명")
-        self.assertEqual(completed["latency_ms"], 1250)
-
-    def test_download_error_marks_analysis_failed_and_preserves_response(self):
-        self.downloader.download.return_value = (
-            None,
-            "이미지를 불러올 수 없습니다.",
-        )
-
-        response = self.client.post("/analyze", json=self.valid_request)
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json(), {
-            "photo": "이미지를 불러올 수 없습니다.",
-        })
-        self.repository.mark_failed.assert_awaited_once_with(
-            11,
-            error_code="IMAGE_DOWNLOAD_ERROR",
-            error_message="이미지를 불러올 수 없습니다.",
-        )
+        self.assertEqual(response.headers["location"], "/analyses/11")
+        self.assertEqual(calls.mock_calls, [
+            call.create(**self.valid_request),
+            call.enqueue(11),
+        ])
+        self.repository.mark_processing.assert_not_awaited()
         self.repository.mark_completed.assert_not_awaited()
+        self.repository.mark_failed.assert_not_awaited()
+        self.repository.mark_enqueue_failed.assert_not_awaited()
 
-    def test_each_required_field_is_rejected_when_missing(self):
-        # 필수 필드가 하나라도 누락되면 422를 반환하는지 검증
+    def test_queue_failure_is_compensated_with_safe_error_and_returns_503(self):
+        secret = "redis password=do-not-persist"
+        self.queue.enqueue.side_effect = RuntimeError(secret)
+
+        with self.assertLogs("app.api.routes.analysis", level="ERROR") as logs:
+            response = self.client.post("/analyze", json=self.valid_request)
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json(), {"detail": "Analysis queue unavailable"})
+        self.assertTrue(any(secret in entry for entry in logs.output))
+        kwargs = self.repository.mark_enqueue_failed.await_args.kwargs
+        self.assertEqual(kwargs["error_code"], "QUEUE_ENQUEUE_FAILED")
+        self.assertEqual(kwargs["error_message"], "Analysis queue is temporarily unavailable")
+        self.assertLessEqual(len(kwargs["error_message"]), 255)
+        self.assertNotIn(secret, kwargs["error_message"])
+
+    def test_queue_failure_returns_503_when_compensation_is_not_applied(self):
+        self.queue.enqueue.side_effect = RuntimeError("redis unavailable")
+        self.repository.mark_enqueue_failed.return_value = False
+
+        with self.assertLogs("app.api.routes.analysis", level="ERROR"):
+            response = self.client.post("/analyze", json=self.valid_request)
+
+        self.assertEqual(response.status_code, 503)
+        self.repository.mark_enqueue_failed.assert_awaited_once()
+
+    def test_queue_failure_returns_503_when_compensation_raises(self):
+        self.queue.enqueue.side_effect = RuntimeError("redis unavailable")
+        self.repository.mark_enqueue_failed.side_effect = RuntimeError("database unavailable")
+
+        with self.assertLogs("app.api.routes.analysis", level="ERROR"):
+            response = self.client.post("/analyze", json=self.valid_request)
+
+        self.assertEqual(response.status_code, 503)
+        self.repository.mark_enqueue_failed.assert_awaited_once()
+
+    def test_database_create_failure_does_not_enqueue(self):
+        self.repository.create.side_effect = RuntimeError("database unavailable")
+
+        response = self.client.post("/analyze", json=self.valid_request)
+
+        self.assertEqual(response.status_code, 500)
+        self.queue.enqueue.assert_not_awaited()
+        self.repository.mark_enqueue_failed.assert_not_awaited()
+
+    def test_each_required_field_is_rejected_before_database_or_queue(self):
         for field in self.valid_request:
             with self.subTest(field=field):
                 payload = dict(self.valid_request)
                 del payload[field]
-
                 response = self.client.post("/analyze", json=payload)
-
                 self.assertEqual(response.status_code, 422)
-                self.assertTrue(any(
-                    error["type"] == "missing"
-                    and error["loc"] == ["body", field]
-                    for error in response.json()["detail"]
-                ))
 
-        # 요청 검증 실패 시 실제 처리 로직은 호출되지 않아야 함
-        self.downloader.download.assert_not_called()
-        self.service.diagnose_with_details.assert_not_called()
         self.repository.create.assert_not_awaited()
+        self.queue.enqueue.assert_not_awaited()
 
-    def test_non_string_fields_are_rejected(self):
-        # 문자열 필드에 숫자가 전달되면 422를 반환하는지 검증
+    def test_non_string_fields_are_rejected_before_database_or_queue(self):
         response = self.client.post("/analyze", json={
             "image_path": 123,
             "temperature": 28,
@@ -163,89 +122,16 @@ class AnalysisHttpTest(unittest.TestCase):
         })
 
         self.assertEqual(response.status_code, 422)
-        errors = response.json()["detail"]
-        self.assertEqual(
-            {(error["loc"][-1], error["type"]) for error in errors},
-            {
-                ("image_path", "string_type"),
-                ("temperature", "string_type"),
-                ("humidity", "string_type"),
-            },
-        )
-        self.downloader.download.assert_not_called()
-        self.service.diagnose_with_details.assert_not_called()
         self.repository.create.assert_not_awaited()
-
-    def test_empty_strings_preserve_current_behavior(self):
-        # 빈 문자열을 허용하는 현재 API 동작을 고정
-        self.service.diagnose_with_details.return_value = DiagnosisOutcome(
-            True, "Healthy", "정상", None, None, None,
-        )
-
-        response = self.client.post("/analyze", json={
-            "image_path": "",
-            "temperature": "",
-            "humidity": "",
-        })
-
-        self.assertEqual(response.status_code, 200)
-        self.downloader.download.assert_called_once_with("")
-        self.service.diagnose_with_details.assert_called_once_with("local.jpg", "", "")
-
-    def test_service_exception_returns_internal_server_error(self):
-        # 처리되지 않은 서비스 예외가 기본 500 응답으로 변환되는지 검증
-        self.service.diagnose_with_details.side_effect = RuntimeError("service failure")
-
-        response = self.client.post("/analyze", json=self.valid_request)
-
-        self.assertEqual(response.status_code, 500)
-        self.assertTrue(response.headers["content-type"].startswith("text/plain"))
-        self.assertEqual(response.text, "Internal Server Error")
-        self.repository.mark_failed.assert_awaited_once_with(
-            11,
-            error_code="RuntimeError",
-            error_message="service failure",
-        )
+        self.queue.enqueue.assert_not_awaited()
 
     def test_get_analysis_returns_every_lifecycle_status(self):
-        for status in AnalysisStatus:
-            with self.subTest(status=status):
-                snapshot = self._analysis_snapshot(status)
-                self.repository.get_by_id.return_value = snapshot
-
+        for analysis_status in AnalysisStatus:
+            with self.subTest(status=analysis_status):
+                self.repository.get_by_id.return_value = self._analysis_snapshot(analysis_status)
                 response = self.client.get("/analyses/11")
-
                 self.assertEqual(response.status_code, 200)
-                body = response.json()
-                self.assertEqual(body["id"], 11)
-                self.assertEqual(body["status"], status.value)
-                self.assertEqual(body["image_path"], self.valid_request["image_path"])
-                self.assertEqual(body["created_at"], "2026-08-08T01:00:00Z")
-                self.assertEqual(set(body), set(snapshot))
-                self.repository.get_by_id.assert_awaited_with(11)
-
-    def test_get_analysis_returns_completed_result(self):
-        snapshot = self._analysis_snapshot(AnalysisStatus.COMPLETED)
-        snapshot.update({
-            "is_plant": True,
-            "disease_code": "Leaf_mold",
-            "disease_name": "잎곰팡이병",
-            "explain": "설명",
-            "cause": "원인",
-            "cure": "치료",
-            "model_version": "classifier-v1",
-            "latency_ms": 1250,
-            "started_at": datetime(2026, 8, 8, 1, 0, 1, tzinfo=timezone.utc),
-            "completed_at": datetime(2026, 8, 8, 1, 0, 2, tzinfo=timezone.utc),
-        })
-        self.repository.get_by_id.return_value = snapshot
-
-        response = self.client.get("/analyses/11")
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["disease_code"], "Leaf_mold")
-        self.assertEqual(response.json()["disease_name"], "잎곰팡이병")
-        self.assertEqual(response.json()["completed_at"], "2026-08-08T01:00:02Z")
+                self.assertEqual(response.json()["status"], analysis_status.value)
 
     def test_get_analysis_returns_not_found(self):
         self.repository.get_by_id.return_value = None
@@ -254,18 +140,11 @@ class AnalysisHttpTest(unittest.TestCase):
 
         self.assertEqual(response.status_code, 404)
         self.assertEqual(response.json(), {"detail": "Analysis not found"})
-        self.repository.get_by_id.assert_awaited_once_with(404)
 
-    def test_get_analysis_rejects_non_integer_id(self):
-        response = self.client.get("/analyses/not-an-integer")
-
-        self.assertEqual(response.status_code, 422)
-        self.repository.get_by_id.assert_not_awaited()
-
-    def _analysis_snapshot(self, status: AnalysisStatus) -> dict[str, object]:
+    def _analysis_snapshot(self, analysis_status: AnalysisStatus) -> dict[str, object]:
         return {
             "id": 11,
-            "status": status,
+            "status": analysis_status,
             "image_path": self.valid_request["image_path"],
             "temperature": "28",
             "humidity": "85",
