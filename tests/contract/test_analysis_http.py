@@ -79,7 +79,7 @@ class AnalysisHttpTest(unittest.TestCase):
 
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.json(), {"detail": "Analysis queue unavailable"})
-        self.assertTrue(any(secret in entry for entry in logs.output))
+        self.assertFalse(any(secret in entry for entry in logs.output))
         kwargs = self.repository.mark_enqueue_failed.await_args.kwargs
         self.assertEqual(kwargs["error_code"], "QUEUE_ENQUEUE_FAILED")
         self.assertEqual(kwargs["error_message"], "Analysis queue is temporarily unavailable")
