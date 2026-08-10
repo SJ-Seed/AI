@@ -2,30 +2,41 @@
 
 from contextlib import asynccontextmanager
 
-from arq.connections import create_pool
 from fastapi import FastAPI
 
 from app.api.routes.analysis import router as analysis_router
 from app.api.routes.health import router as health_router
-from app.core.config import load_settings, require_redis_url
-from app.infrastructure.queue.arq_analysis_queue import ArqAnalysisQueue
-from app.infrastructure.queue.redis_settings import build_redis_settings
+from app.core.config import load_settings
+from app.core.logging import get_logger
+from app.infrastructure.queue.arq_analysis_queue import ManagedArqAnalysisQueue
+from app.infrastructure.queue.redis_connection import (
+    RedisConnectionManager,
+    RedisUnavailableError,
+)
+
+
+logger = get_logger(__name__)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = load_settings()
-    redis_url = require_redis_url(settings)
-    redis = await create_pool(build_redis_settings(redis_url))
+    redis_connections = RedisConnectionManager(settings.redis_url)
+    app.state.redis_connections = redis_connections
+    app.state.analysis_queue = ManagedArqAnalysisQueue(
+        redis_connections,
+        settings.analysis_queue_name,
+    )
 
     try:
-        app.state.analysis_queue = ArqAnalysisQueue(
-            redis,
-            settings.analysis_queue_name,
-        )
+        await redis_connections.ping()
+    except RedisUnavailableError:
+        logger.warning("Redis is unavailable during application startup")
+
+    try:
         yield
     finally:
-        await redis.aclose()
+        await redis_connections.close()
 
 
 def create_app() -> FastAPI:
