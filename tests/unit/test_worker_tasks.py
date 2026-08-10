@@ -49,6 +49,7 @@ class WorkerTaskTest(unittest.TestCase):
         self.repository.get_by_id = AsyncMock(return_value={
             "id": 11,
             "status": AnalysisStatus.PENDING,
+            "retry_count": 0,
             "started_at": None,
             "image_path": "https://example/image.jpg",
             "temperature": "28",
@@ -129,7 +130,8 @@ class WorkerTaskTest(unittest.TestCase):
         path = self._temporary_file()
         self.downloader.download.return_value = ImageDownloadResult(path, None, True)
 
-        with patch("app.worker.tasks.perf_counter", side_effect=[100.0, 101.25]):
+        with patch("app.worker.tasks.perf_counter", side_effect=[100.0, 101.25]), \
+                self.assertLogs("app.worker.tasks", level="INFO") as logs:
             result = asyncio.run(process_analysis(self.ctx, 11))
 
         self.assertTrue(result)
@@ -143,20 +145,39 @@ class WorkerTaskTest(unittest.TestCase):
         self.assertEqual(kwargs["disease_code"], "Leaf_mold")
         self.assertEqual(kwargs["model_version"], "classifier-v1")
         self.assertEqual(kwargs["latency_ms"], 1250)
+        status_records = [
+            record for record in logs.records
+            if getattr(record, "event", None) == "analysis_status_changed"
+        ]
+        self.assertEqual([record.status for record in status_records], [
+            "PROCESSING", "COMPLETED"
+        ])
+        self.assertEqual(status_records[1].analysis_id, 11)
+        self.assertEqual(status_records[1].duration_ms, 1250)
+        self.assertEqual(status_records[1].retry_count, 0)
+        self.assertIsNone(status_records[1].failure_reason)
 
     def test_download_error_uses_fixed_code_and_safe_message(self):
         secret = "signed-url-secret"
         self.downloader.download.return_value = ImageDownloadResult(None, secret, False)
 
-        with self.assertLogs("app.worker.tasks", level="ERROR") as logs:
+        with self.assertLogs("app.worker.tasks", level="INFO") as logs:
             with self.assertRaises(ImageDownloadFailure):
                 asyncio.run(process_analysis(self.ctx, 11))
 
-        self.assertTrue(any(secret in entry for entry in logs.output))
+        self.assertFalse(any(secret in entry for entry in logs.output))
         kwargs = self.repository.mark_failed.await_args.kwargs
         self.assertEqual(kwargs["error_code"], IMAGE_DOWNLOAD_ERROR)
         self.assertEqual(kwargs["error_message"], "Image download failed")
         self.assertNotIn(secret, kwargs["error_message"])
+        failed = next(
+            record for record in logs.records
+            if getattr(record, "status", None) == "FAILED"
+        )
+        self.assertEqual(failed.analysis_id, 11)
+        self.assertEqual(failed.retry_count, 0)
+        self.assertGreaterEqual(failed.duration_ms, 0)
+        self.assertEqual(failed.failure_reason, IMAGE_DOWNLOAD_ERROR)
 
     def test_unexpected_downloader_exception_is_logged_safely_and_reraised(self):
         secret = "downloader-secret"
@@ -167,8 +188,9 @@ class WorkerTaskTest(unittest.TestCase):
             with self.assertRaises(RuntimeError) as raised:
                 asyncio.run(process_analysis(self.ctx, 11))
 
-        self.assertIs(raised.exception, error)
-        self.assertTrue(any(secret in entry for entry in logs.output))
+        self.assertIsInstance(raised.exception, WorkerInternalFailure)
+        self.assertNotIn(secret, str(raised.exception))
+        self.assertFalse(any(secret in entry for entry in logs.output))
         kwargs = self.repository.mark_failed.await_args.kwargs
         self.assertEqual(kwargs["error_code"], WORKER_INTERNAL_ERROR)
         self.assertEqual(kwargs["error_message"], "Worker processing failed")
@@ -186,9 +208,10 @@ class WorkerTaskTest(unittest.TestCase):
                 with self.assertRaises(RuntimeError) as raised:
                     asyncio.run(process_analysis(self.ctx, 11))
 
-            self.assertIs(raised.exception, error)
+            self.assertIsInstance(raised.exception, WorkerInternalFailure)
+            self.assertNotIn(secret, str(raised.exception))
             self.assertTrue(Path(local_path).exists())
-            self.assertTrue(any(secret in entry for entry in logs.output))
+            self.assertFalse(any(secret in entry for entry in logs.output))
             kwargs = self.repository.mark_failed.await_args.kwargs
             self.assertEqual(kwargs["error_code"], WORKER_INTERNAL_ERROR)
             self.assertEqual(kwargs["error_message"], "Worker processing failed")
@@ -221,7 +244,8 @@ class WorkerTaskTest(unittest.TestCase):
         )
         self.repository.reschedule_for_retry.return_value = 3
 
-        with patch("app.worker.tasks.random.uniform", return_value=4.5) as uniform:
+        with patch("app.worker.tasks.random.uniform", return_value=4.5) as uniform, \
+                self.assertLogs("app.worker.tasks", level="INFO") as logs:
             with self.assertRaises(Retry) as raised:
                 asyncio.run(process_analysis(self.ctx, 11))
 
@@ -231,6 +255,12 @@ class WorkerTaskTest(unittest.TestCase):
         uniform.assert_called_once_with(0, 8)
         self.assertEqual(raised.exception.defer_score, 4500)
         self.repository.mark_failed.assert_not_awaited()
+        pending = next(
+            record for record in logs.records
+            if getattr(record, "status", None) == "PENDING"
+        )
+        self.assertEqual(pending.retry_count, 3)
+        self.assertEqual(pending.failure_reason, IMAGE_DOWNLOAD_ERROR)
 
     def test_transient_failure_is_failed_after_four_retries_are_exhausted(self):
         self.downloader.download.return_value = ImageDownloadResult(
@@ -297,8 +327,9 @@ class WorkerTaskTest(unittest.TestCase):
                 with self.assertRaises(RuntimeError) as raised:
                     asyncio.run(process_analysis(self.ctx, 11))
 
-            self.assertIs(raised.exception, error)
-            self.assertTrue(any(secret in entry for entry in logs.output))
+            self.assertIsInstance(raised.exception, WorkerInternalFailure)
+            self.assertNotIn(secret, str(raised.exception))
+            self.assertFalse(any(secret in entry for entry in logs.output))
             kwargs = self.repository.mark_failed.await_args.kwargs
             self.assertEqual(kwargs["error_code"], WORKER_INTERNAL_ERROR)
             self.assertEqual(kwargs["error_message"], "Worker processing failed")
