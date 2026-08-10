@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.application.services.diagnosis_service import DiagnosisService
 from app.core.config import Settings, load_settings, require_openai_api_key
-from app.core.logging import get_logger
+from app.core.logging import get_logger, log_analysis_status_change
 from app.domain.enums import AnalysisStatus
 from app.infrastructure.image.image_downloader import (
     ImageDownloader,
@@ -27,6 +27,7 @@ from app.infrastructure.queue.arq_analysis_queue import ArqAnalysisQueue
 from app.worker.error_policy import classify_ai_error
 
 
+# app.* 로그에 공통 JSON 형식을 적용한 모듈 로거
 logger = get_logger(__name__)
 
 # Worker 실패 원인을 DB에 저장할 때 사용하는 고정 오류 코드
@@ -165,7 +166,7 @@ async def reconcile_pending_analyses(ctx: dict[str, Any]) -> int:
         try:
             await queue.enqueue(analysis_id)
         except Exception:
-            logger.exception(
+            logger.error(
                 "Failed to reconcile analysis Queue registration",
                 extra={"analysis_id": analysis_id},
             )
@@ -175,7 +176,7 @@ async def reconcile_pending_analyses(ctx: dict[str, Any]) -> int:
                     await repository.release_enqueue_claim(analysis_id)
             except Exception:
                 # claim lease 만료 후 다음 reconciliation이 다시 선점한다.
-                logger.exception(
+                logger.error(
                     "Failed to release analysis reconciliation claim",
                     extra={"analysis_id": analysis_id},
                 )
@@ -188,7 +189,7 @@ async def reconcile_pending_analyses(ctx: dict[str, Any]) -> int:
             enqueued_count += 1
         except Exception:
             # Redis job ID가 멱등적이므로 claim 만료 후 안전하게 다시 시도할 수 있다.
-            logger.exception(
+            logger.error(
                 "Failed to record reconciled Queue registration",
                 extra={"analysis_id": analysis_id},
             )
@@ -228,6 +229,18 @@ async def process_analysis(ctx: dict[str, Any], analysis_id: int) -> bool:
     # Worker의 실제 처리 시간 측정 시작
     started_at = perf_counter()
 
+    # 저장된 재시도 횟수
+    retry_count = int(analysis.get("retry_count", 0))
+
+    # Worker가 작업을 점유하여 실제 분석 처리 시작했음을 기록
+    log_analysis_status_change(
+        logger,
+        analysis_id=analysis_id,
+        status=AnalysisStatus.PROCESSING.value,
+        duration_ms=0,
+        retry_count=retry_count,
+    )
+
     try:
         try:
             # 동기 request 호출이 이벤트 루프를 막지 않도록 별도 스레드에서 실행
@@ -235,34 +248,51 @@ async def process_analysis(ctx: dict[str, Any], analysis_id: int) -> bool:
                 ctx["image_downloader"].download,
                 analysis["image_path"],
             )
-        except Exception as error:
-            # Downloader 자체에서 예상하지 못한 예외가 발생한 경우
-            logger.exception(
+        except Exception:
+            # Downloader 자체에서 예상하지 못한 예외가 발생한 경우 로그
+            logger.error(
                 "Image downloader raised unexpectedly",
-                extra={"analysis_id": analysis_id},
+                extra={"analysis_id": analysis_id, "error_code": WORKER_INTERNAL_ERROR},
             )
-            await _persist_failure(session_factory, analysis_id, WORKER_INTERNAL_ERROR)
-            raise error
+            await _persist_failure(
+                session_factory,
+                analysis_id,
+                WORKER_INTERNAL_ERROR,
+                duration_ms=_elapsed_ms(started_at),
+                retry_count=retry_count,
+            )
+            raise WorkerInternalFailure(SAFE_ERROR_MESSAGES[WORKER_INTERNAL_ERROR]) from None
 
-        # Downloader가 정상적으로 실패 결과를 반환한 경우
+        # Downloader가 정상적으로 실패 결과를 반환한 경우 로그
         if download_result.error is not None or download_result.path is None:
             logger.error(
-                "Image download failed: %s",
-                download_result.error,
-                extra={"analysis_id": analysis_id},
+                "Image download failed",
+                extra={"analysis_id": analysis_id, "error_code": IMAGE_DOWNLOAD_ERROR},
             )
-            error = ImageDownloadFailure(download_result.error or "Image download failed")
+            error = ImageDownloadFailure(SAFE_ERROR_MESSAGES[IMAGE_DOWNLOAD_ERROR])
             if download_result.failure_kind == ImageDownloadFailureKind.TRANSIENT_NETWORK:
                 await _retry_or_fail(
-                    ctx, session_factory, analysis_id, error, IMAGE_DOWNLOAD_ERROR
+                    ctx,
+                    session_factory,
+                    analysis_id,
+                    error,
+                    IMAGE_DOWNLOAD_ERROR,
+                    started_at=started_at,
+                    current_retry_count=retry_count,
                 )
             code = (
                 INVALID_IMAGE_ERROR
                 if download_result.failure_kind == ImageDownloadFailureKind.INVALID_IMAGE
                 else IMAGE_DOWNLOAD_ERROR
             )
-            await _persist_failure(session_factory, analysis_id, code)
-            raise error
+            await _persist_failure(
+                session_factory,
+                analysis_id,
+                code,
+                duration_ms=_elapsed_ms(started_at),
+                retry_count=retry_count,
+            )
+            raise ImageDownloadFailure(SAFE_ERROR_MESSAGES[code]) from None
 
         try:
             # 동기 AI 분석도 이벤트 루프를 막지 않도록 별도 스레드에서 실행
@@ -273,11 +303,16 @@ async def process_analysis(ctx: dict[str, Any], analysis_id: int) -> bool:
                 analysis["humidity"],
             )
         except Exception as error:
-            logger.exception(
-                "AI analysis failed",
-                extra={"analysis_id": analysis_id},
-            )
             disposition = classify_ai_error(error)
+
+            # AI 오류를 재시도 가능 여부와 안전한 내부 오류 코드로 분류해 기록
+            logger.error(
+                "AI analysis failed",
+                extra={
+                    "analysis_id": analysis_id,
+                    "error_code": disposition.error_code,
+                },
+            )
             if disposition.retryable:
                 await _retry_or_fail(
                     ctx,
@@ -285,11 +320,19 @@ async def process_analysis(ctx: dict[str, Any], analysis_id: int) -> bool:
                     analysis_id,
                     error,
                     disposition.error_code,
+                    started_at=started_at,
+                    current_retry_count=retry_count,
                 )
             await _persist_failure(
-                session_factory, analysis_id, disposition.error_code
+                session_factory,
+                analysis_id,
+                disposition.error_code,
+                duration_ms=_elapsed_ms(started_at),
+                retry_count=retry_count,
             )
-            raise error
+            raise WorkerInternalFailure(
+                SAFE_ERROR_MESSAGES[disposition.error_code]
+            ) from None
 
         # 다운로드 시작부터 AI 분석 완료까지 걸린 시간
         latency_ms = int((perf_counter() - started_at) * 1000)
@@ -303,19 +346,43 @@ async def process_analysis(ctx: dict[str, Any], analysis_id: int) -> bool:
                 latency_ms,
             )
         except Exception:
-            logger.exception(
+            # 분석은 수행됐지만 결과를 DB에 저장하지 못한 경우를 기록
+            logger.error(
                 "Failed to persist completed analysis",
-                extra={"analysis_id": analysis_id},
+                extra={"analysis_id": analysis_id, "error_code": WORKER_INTERNAL_ERROR},
             )
-            await _persist_failure(session_factory, analysis_id, WORKER_INTERNAL_ERROR)
-            raise
+            await _persist_failure(
+                session_factory,
+                analysis_id,
+                WORKER_INTERNAL_ERROR,
+                duration_ms=_elapsed_ms(started_at),
+                retry_count=retry_count,
+            )
+            raise WorkerInternalFailure(SAFE_ERROR_MESSAGES[WORKER_INTERNAL_ERROR]) from None
 
         # 상태 조건 불일치로 완료 전이가 거부된 경우
         if not completed:
             error = WorkerInternalFailure("Analysis completion transition was rejected")
-            logger.error(str(error), extra={"analysis_id": analysis_id})
-            await _persist_failure(session_factory, analysis_id, WORKER_INTERNAL_ERROR)
+            logger.error(
+                "Analysis completion transition was rejected",
+                extra={"analysis_id": analysis_id, "error_code": WORKER_INTERNAL_ERROR},
+            )
+            await _persist_failure(
+                session_factory,
+                analysis_id,
+                WORKER_INTERNAL_ERROR,
+                duration_ms=_elapsed_ms(started_at),
+                retry_count=retry_count,
+            )
             raise error
+        # DB의 COMPLETED 상태 전이가 성공한 후에만 상태 변경 이벤트 기록
+        log_analysis_status_change(
+            logger,
+            analysis_id=analysis_id,
+            status=AnalysisStatus.COMPLETED.value,
+            duration_ms=latency_ms,
+            retry_count=retry_count,
+        )
         return True
     finally:
         # 성공, 실패와 상관 없이 Worker가 생성한 임시 파일 삭제
@@ -344,14 +411,14 @@ async def _claim_and_load(ctx: dict[str, Any], analysis_id: int):
             else:
                 analysis = await repository.get_by_id(analysis_id)
     except Exception:
-        logger.exception(
+        logger.error(
             "Failed while claiming or loading analysis",
-            extra={"analysis_id": analysis_id},
+            extra={"analysis_id": analysis_id, "error_code": WORKER_INTERNAL_ERROR},
         )
         # 선점 후 조회 과정에서 실패했다면 PROCESSING 작업을 FAILED로 변경
         if claimed:
             await _persist_failure(session_factory, analysis_id, WORKER_INTERNAL_ERROR)
-        raise
+        raise WorkerInternalFailure(SAFE_ERROR_MESSAGES[WORKER_INTERNAL_ERROR]) from None
 
     if not claimed:
         if analysis is not None and analysis["status"] == AnalysisStatus.PROCESSING:
@@ -378,6 +445,10 @@ async def _claim_and_load(ctx: dict[str, Any], analysis_id: int):
         await _persist_failure(session_factory, analysis_id, WORKER_INTERNAL_ERROR)
         raise error
     return analysis
+
+
+def _elapsed_ms(started_at: float) -> int:
+    return max(0, int((perf_counter() - started_at) * 1000))
 
 
 async def _persist_completion(
@@ -407,11 +478,15 @@ async def _persist_failure(
     session_factory,
     analysis_id: int,
     error_code: str,
+    *,
+    duration_ms: int = 0,
+    retry_count: int = 0,
 ) -> None:
     """
     PROCESSING 작업을 FAILED로 변경한다.
-    원본 예외는 로그에만 남기고 DB에는 고정된 안전 메시지만 저장한다.
-    실패 상태 저장이 다시 실패하더라도 원래 예외 처리를 방해하지 않는다.
+    원본 예외는 로그와 DB에 기록하지 않고 안전한 오류 코드와 메시지만 사용한다.
+    DB 상태 변경이 성공한 경우에만 FAILED 상태 변경 로그를 기록한다.
+    실패 상태 저장이 다시 실패해도 기존 예외 처리를 방해하지 않는다.
     """
     safe_message = SAFE_ERROR_MESSAGES[error_code][:MAX_PERSISTED_ERROR_MESSAGE_LENGTH]
     try:
@@ -427,8 +502,17 @@ async def _persist_failure(
                 "Analysis failure transition was rejected",
                 extra={"analysis_id": analysis_id, "error_code": error_code},
             )
+        else:
+            log_analysis_status_change(
+                logger,
+                analysis_id=analysis_id,
+                status=AnalysisStatus.FAILED.value,
+                duration_ms=duration_ms,
+                retry_count=retry_count,
+                failure_reason=error_code,
+            )
     except Exception:
-        logger.exception(
+        logger.error(
             "Failed to persist worker failure",
             extra={"analysis_id": analysis_id, "error_code": error_code},
         )
@@ -440,6 +524,9 @@ async def _retry_or_fail(
     analysis_id: int,
     error: BaseException,
     terminal_error_code: str,
+    *,
+    started_at: float,
+    current_retry_count: int,
 ) -> None:
     settings: Settings = ctx["settings"]
     try:
@@ -449,32 +536,54 @@ async def _retry_or_fail(
                 analysis_id, max_retry_count=settings.max_retry_count
             )
     except Exception:
-        logger.exception(
+        logger.error(
             "Failed to reschedule analysis retry",
-            extra={"analysis_id": analysis_id},
+            extra={"analysis_id": analysis_id, "error_code": WORKER_INTERNAL_ERROR},
         )
         await _persist_failure(
-            session_factory, analysis_id, WORKER_INTERNAL_ERROR
+            session_factory,
+            analysis_id,
+            WORKER_INTERNAL_ERROR,
+            duration_ms=_elapsed_ms(started_at),
+            retry_count=current_retry_count,
         )
-        raise
+        raise WorkerInternalFailure(SAFE_ERROR_MESSAGES[WORKER_INTERNAL_ERROR]) from None
 
     if retry_count is None:
-        await _persist_failure(session_factory, analysis_id, terminal_error_code)
-        raise error
+        await _persist_failure(
+            session_factory,
+            analysis_id,
+            terminal_error_code,
+            duration_ms=_elapsed_ms(started_at),
+            retry_count=current_retry_count,
+        )
+        if isinstance(error, ImageDownloadFailure):
+            raise ImageDownloadFailure(SAFE_ERROR_MESSAGES[terminal_error_code]) from None
+        raise WorkerInternalFailure(SAFE_ERROR_MESSAGES[terminal_error_code]) from None
 
     cap = min(
         settings.retry_max_delay_seconds,
         settings.retry_base_delay_seconds * (2 ** (retry_count - 1)),
     )
     delay = random.uniform(0, cap)
+    duration_ms = _elapsed_ms(started_at)
     logger.warning(
-        "Retrying transient analysis failure: %s",
-        error,
+        "Retrying transient analysis failure",
         extra={
             "analysis_id": analysis_id,
             "retry_count": retry_count,
             "retry_delay_seconds": delay,
+            "duration_ms": duration_ms,
+            "failure_reason": terminal_error_code,
         },
+    )
+    log_analysis_status_change(
+        logger,
+        analysis_id=analysis_id,
+        status=AnalysisStatus.PENDING.value,
+        duration_ms=duration_ms,
+        retry_count=retry_count,
+        failure_reason=terminal_error_code,
     )
     raise Retry(defer=delay)
 
@@ -496,6 +605,5 @@ def _remove_owned_temporary_file(
     except Exception:
         logger.warning(
             "Failed to remove temporary analysis image",
-            exc_info=True,
             extra={"analysis_id": analysis_id},
         )

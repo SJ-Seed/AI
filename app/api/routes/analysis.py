@@ -6,7 +6,7 @@ from app.api.dependencies import get_analysis_queue, get_analysis_repository
 from app.api.schemas import AnalysisResponse, AnalyzeAcceptedResponse, AnalyzeRequest
 from app.application.ports.analysis_queue import AnalysisQueue
 from app.application.ports.analysis_repository import AnalysisRepository
-from app.core.logging import get_logger
+from app.core.logging import get_logger, log_analysis_status_change
 from app.domain.enums import AnalysisStatus
 
 
@@ -58,6 +58,14 @@ async def analyze_endpoint(
         temperature=body.temperature,
         humidity=body.humidity,
     )
+    # PENDING 상태가 된 순간 로그를 남기는 호출
+    log_analysis_status_change(
+        logger,
+        analysis_id=analysis_id,
+        status=AnalysisStatus.PENDING.value,
+        duration_ms=0,
+        retry_count=0,
+    )
 
     try:
         # 2. Worker가 처리할 수 있도록 큐에는 분석 ID만 등록
@@ -76,11 +84,21 @@ async def analyze_endpoint(
                     :MAX_PERSISTED_ERROR_MESSAGE_LENGTH
                 ],
             )
-            # 이미 상태가 바뀌었거나 작업을 찾지 못해 보성 처리 되지 않은 경우
+            # 이미 상태가 바뀌었거나 작업을 찾지 못해 보상 처리 되지 않은 경우
             if not compensated:
                 logger.error(
                     "Analysis enqueue failure compensation was not applied",
                     extra={"analysis_id": analysis_id},
+                )
+            else:
+                # 분석 작업의 큐 등록이 실패해서 DB 상태를 FAILED로 변경한 뒤 남기는 구조화 로그
+                log_analysis_status_change(
+                    logger,
+                    analysis_id=analysis_id,
+                    status=AnalysisStatus.FAILED.value,
+                    duration_ms=0,
+                    retry_count=0,
+                    failure_reason=QUEUE_ENQUEUE_ERROR_CODE,
                 )
         except Exception:
             # 큐 등록 실패를 DB에 기록하는 작업까지 실패한 경우
