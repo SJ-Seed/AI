@@ -2,6 +2,11 @@
 
 from arq.connections import ArqRedis
 
+from app.infrastructure.queue.redis_connection import (
+    RedisConnectionManager,
+    RedisUnavailableError,
+)
+
 
 # Worker가 Queue에서 작업을 가져왔을 때 실행할 함수 이름
 ANALYSIS_JOB_FUNCTION = "process_analysis"
@@ -34,3 +39,26 @@ class ArqAnalysisQueue:
             # 작업을 등록할 Redis Queue 이름
             _queue_name=self._queue_name,
         )
+
+
+class ManagedArqAnalysisQueue:
+    """일시적인 Redis 장애 발생 시 연결을 폐기하고 재연결을 지원하는 분석 큐"""
+
+    def __init__(self, connections: RedisConnectionManager, queue_name: str) -> None:
+        self._connections = connections
+        self._queue_name = queue_name
+
+    async def enqueue(self, analysis_id: int) -> None:
+        redis: ArqRedis | None = None
+        try:
+            # 기존 연결이 유효하면 재사용, 없으면 RedisConnectManager 통해 새 연결 생성
+            redis = await self._connections.get_connection()
+
+            # 현재 연결을 이용하여 분석 작업을 ARQ 큐에 등록
+            await ArqAnalysisQueue(redis, self._queue_name).enqueue(analysis_id)
+
+        except Exception:
+            # 실패한 연결을 재사용하지 않도록 폐기
+            if redis is not None:
+                await self._connections.invalidate(redis)
+            raise RedisUnavailableError("Analysis queue is unavailable") from None

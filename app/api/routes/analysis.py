@@ -6,7 +6,7 @@ from app.api.dependencies import get_analysis_queue, get_analysis_repository
 from app.api.schemas import AnalysisResponse, AnalyzeAcceptedResponse, AnalyzeRequest
 from app.application.ports.analysis_queue import AnalysisQueue
 from app.application.ports.analysis_repository import AnalysisRepository
-from app.core.logging import get_logger
+from app.core.logging import get_logger, log_analysis_status_change
 from app.domain.enums import AnalysisStatus
 
 
@@ -58,14 +58,22 @@ async def analyze_endpoint(
         temperature=body.temperature,
         humidity=body.humidity,
     )
+    # PENDING 상태가 된 순간 로그를 남기는 호출
+    log_analysis_status_change(
+        logger,
+        analysis_id=analysis_id,
+        status=AnalysisStatus.PENDING.value,
+        duration_ms=0,
+        retry_count=0,
+    )
 
     try:
         # 2. Worker가 처리할 수 있도록 큐에는 분석 ID만 등록
         await queue.enqueue(analysis_id)
     except Exception as error:
         # DB에 남아 있는 PENDING 작업을 FAILED 상태로 변경
-        logger.exception(
-            "Failed to enqueue analysis",
+        logger.error(
+            "Failed to enqueue analysis because the queue is unavailable",
             extra={"analysis_id": analysis_id},
         )
         try:
@@ -76,16 +84,26 @@ async def analyze_endpoint(
                     :MAX_PERSISTED_ERROR_MESSAGE_LENGTH
                 ],
             )
-            # 이미 상태가 바뀌었거나 작업을 찾지 못해 보성 처리 되지 않은 경우
+            # 이미 상태가 바뀌었거나 작업을 찾지 못해 보상 처리 되지 않은 경우
             if not compensated:
                 logger.error(
                     "Analysis enqueue failure compensation was not applied",
                     extra={"analysis_id": analysis_id},
                 )
+            else:
+                # 분석 작업의 큐 등록이 실패해서 DB 상태를 FAILED로 변경한 뒤 남기는 구조화 로그
+                log_analysis_status_change(
+                    logger,
+                    analysis_id=analysis_id,
+                    status=AnalysisStatus.FAILED.value,
+                    duration_ms=0,
+                    retry_count=0,
+                    failure_reason=QUEUE_ENQUEUE_ERROR_CODE,
+                )
         except Exception:
             # 큐 등록 실패를 DB에 기록하는 작업까지 실패한 경우
-            logger.exception(
-                "Failed to persist analysis enqueue failure",
+            logger.error(
+                "Failed to persist analysis queue failure",
                 extra={"analysis_id": analysis_id},
             )
 
@@ -104,9 +122,9 @@ async def analyze_endpoint(
                 extra={"analysis_id": analysis_id},
             )
     except Exception:
-        # Queue 등록은 완료되었으므로 고유 job ID를 사용하는 reconciliation이 안전하게 보완한다.
-        logger.exception(
-            "Failed to record analysis Queue registration",
+        # 큐 등록 후 DB 기록에 실패한 경우, 후속 복구를 위해 작업 ID와 함께 오류를 기록
+        logger.error(
+            "Failed to record analysis queue registration",
             extra={"analysis_id": analysis_id},
         )
 

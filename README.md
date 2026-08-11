@@ -222,6 +222,120 @@ Health Check
 
 배포된 애플리케이션의 상태는 `/health` 엔드포인트를 통해 확인합니다.
 
+### 운영 상태 확인 및 CloudWatch 모니터링
+
+#### 상태 확인 API
+
+상태 확인 엔드포인트는 용도에 따라 다음과 같이 구분합니다.
+
+| 엔드포인트 | 확인 범위 | 정상 응답 | 장애 응답 |
+| --- | --- | --- | --- |
+| `/health/live` | FastAPI 프로세스 | `200` | 프로세스가 응답하지 않음 |
+| `/health`, `/health/ready` | API, PostgreSQL, Redis | 모두 정상이면 `200` | 의존 서비스 하나라도 비정상이면 `503` |
+
+```bash
+curl -i http://localhost:8000/health/live
+curl -i http://localhost:8000/health
+```
+
+Readiness 응답은 서비스를 구분해 반환합니다.
+
+```json
+{
+  "status": "healthy",
+  "services": {
+    "api": {"status": "up"},
+    "postgresql": {"status": "up"},
+    "redis": {"status": "up"}
+  }
+}
+```
+
+#### 최초 모니터링 구성
+
+모니터링 구성은 `deploy/monitoring`에 있으며 다음 순서로 한 번 적용합니다. AWS 설정 스크립트를 다시 실행하면 기존 SNS topic, IAM role과 Alarm을 갱신해 재사용합니다.
+
+사전 조건:
+
+- 로컬 실행 환경에 AWS CLI v2가 설치되고 대상 계정으로 인증되어 있어야 합니다.
+- 실행 주체에는 EC2 조회·instance profile 연결, IAM role/policy, CloudWatch, CloudWatch Logs, SNS 설정 권한이 필요합니다.
+- 대상 EC2에 SSH와 `sudo`로 접근할 수 있어야 합니다.
+
+먼저 AWS 리소스를 구성합니다. instance ID와 이메일은 예시 값으로 바꾸며 저장소 파일에 기록하지 않습니다.
+
+```bash
+AWS_REGION=ap-northeast-2 bash deploy/monitoring/provision-aws.sh \
+  --instance-id i-0123456789abcdef0 \
+  --email operator@example.com
+```
+
+스크립트는 기존 EC2 instance profile을 재사용하거나 전용 profile을 연결하고, CloudWatch Agent 권한, SNS topic, 30일 보존 로그 그룹과 Alarm을 구성합니다. 새 SNS 이메일 구독은 AWS가 보낸 메일의 **Confirm subscription** 링크를 눌러야 알림을 받을 수 있습니다.
+
+그다음 EC2의 최신 저장소에서 Agent와 1분 주기 health probe를 설치합니다.
+
+```bash
+cd ~/opt/AI
+sudo bash deploy/monitoring/install-on-ec2.sh
+```
+
+Agent 설정을 변경한 경우에도 같은 설치 명령을 다시 실행하면 새 설정이 반영됩니다.
+
+#### 수집 지표와 Alarm
+
+CloudWatch Agent 지표와 서비스 상태 지표는 `SJSeed/AI`, EC2 기본 지표는 `AWS/EC2` namespace에서 확인합니다.
+
+| Alarm | 조건 | 누락 데이터 처리 |
+| --- | --- | --- |
+| CPU | 5분 평균 `CPUUtilization >= 80%` | 장애 |
+| 메모리 | 5분 평균 `mem_used_percent >= 80%` | 장애 |
+| 루트 디스크 | 5분 평균 `disk_used_percent >= 80%` | 장애 |
+| EC2 instance/system 상태 검사 | 1분 간격 2회 연속 실패 | 유지 |
+| API | `HealthApi == 0` 2회 연속 | 장애 |
+| PostgreSQL | `HealthPostgresql == 0` 2회 연속 | 정상 |
+| Redis | `HealthRedis == 0` 2회 연속 | 정상 |
+
+API에 연결하지 못하면 PostgreSQL과 Redis 상태를 추측하지 않고 해당 지표를 생략합니다. 따라서 API Alarm이 probe나 Agent 자체의 데이터 누락까지 감지하고, 의존 서비스 Alarm은 `/health`가 명시적으로 `down`을 반환할 때만 발생합니다. 모든 Alarm은 ALARM과 OK 전환을 같은 SNS topic으로 알립니다.
+
+#### 운영 확인
+
+EC2에서 Agent와 timer 상태를 확인합니다.
+
+```bash
+sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a status
+systemctl status sjseed-health-probe.timer
+systemctl list-timers sjseed-health-probe.timer
+journalctl -u sjseed-health-probe.service --since "10 minutes ago"
+```
+
+API와 worker의 Docker 로그는 EC2의 `/var/log/sjseed/application.log`에 스트리밍된 뒤 `/sjseed/ai/docker` CloudWatch Logs group에 30일간 저장됩니다. 로그 스트리밍 서비스는 설치 이후 새로 발생한 항목만 전달하며, 호스트 파일은 매일 순환해 7개를 보관합니다. 분석 상태 로그는 CloudWatch Logs Insights에서 다음처럼 찾을 수 있습니다.
+
+```text
+fields @timestamp, @message
+| filter @message like /analysis_status_changed/
+| sort @timestamp desc
+| limit 100
+```
+
+이 로그에는 `analysis_id`, `status`, `duration_ms`, `retry_count`, `failure_reason`이 포함되며 원본 예외, API key, DB/Redis 접속 URL은 기록하지 않습니다.
+
+SNS 전달 경로는 서비스를 중단하지 않고 다음 명령으로 확인할 수 있습니다. Alarm 이름은 대상 instance ID에 맞게 변경합니다.
+
+```bash
+aws cloudwatch set-alarm-state \
+  --region ap-northeast-2 \
+  --alarm-name sjseed-ai-i-0123456789abcdef0-health-api-down \
+  --state-value ALARM \
+  --state-reason "monitoring verification"
+
+aws cloudwatch set-alarm-state \
+  --region ap-northeast-2 \
+  --alarm-name sjseed-ai-i-0123456789abcdef0-health-api-down \
+  --state-value OK \
+  --state-reason "monitoring verification complete"
+```
+
+실제 의존 서비스 장애 검증은 운영 트래픽이 없는 점검 시간에만 수행합니다. Redis 또는 PostgreSQL 컨테이너를 하나씩 중단하고 `/health`의 `503` 및 해당 서비스 `down`, 2분 뒤 Alarm과 이메일을 확인한 다음 즉시 컨테이너를 복구하고 `/health`와 OK 알림을 다시 확인합니다. 두 의존 서비스를 동시에 중단하거나 데이터 volume을 삭제하지 않습니다.
+
 <br/>
 
 ## ⚙️ 비동기 AI 분석 구조

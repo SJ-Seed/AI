@@ -1,6 +1,6 @@
 import unittest
 from datetime import datetime, timezone
-from unittest.mock import AsyncMock, Mock, call
+from unittest.mock import AsyncMock, Mock, call, patch
 
 from fastapi.testclient import TestClient
 
@@ -42,7 +42,8 @@ class AnalysisHttpTest(unittest.TestCase):
         calls.attach_mock(self.queue.enqueue, "enqueue")
         calls.attach_mock(self.repository.mark_enqueued, "mark_enqueued")
 
-        response = self.client.post("/analyze", json=self.valid_request)
+        with patch("app.api.routes.analysis.log_analysis_status_change") as status_log:
+            response = self.client.post("/analyze", json=self.valid_request)
 
         self.assertEqual(response.status_code, 202)
         self.assertEqual(response.json(), {
@@ -60,6 +61,12 @@ class AnalysisHttpTest(unittest.TestCase):
         self.repository.mark_completed.assert_not_awaited()
         self.repository.mark_failed.assert_not_awaited()
         self.repository.mark_enqueue_failed.assert_not_awaited()
+        self.assertEqual(status_log.call_args.kwargs, {
+            "analysis_id": 11,
+            "status": "PENDING",
+            "duration_ms": 0,
+            "retry_count": 0,
+        })
 
     def test_enqueue_tracking_failure_still_returns_accepted(self):
         self.repository.mark_enqueued.side_effect = RuntimeError("database unavailable")
@@ -74,18 +81,25 @@ class AnalysisHttpTest(unittest.TestCase):
         secret = "redis password=do-not-persist"
         self.queue.enqueue.side_effect = RuntimeError(secret)
 
-        with self.assertLogs("app.api.routes.analysis", level="ERROR") as logs:
+        with self.assertLogs("app.api.routes.analysis", level="ERROR") as logs, patch(
+            "app.api.routes.analysis.log_analysis_status_change"
+        ) as status_log:
             response = self.client.post("/analyze", json=self.valid_request)
 
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.json(), {"detail": "Analysis queue unavailable"})
-        self.assertTrue(any(secret in entry for entry in logs.output))
+        self.assertFalse(any(secret in entry for entry in logs.output))
         kwargs = self.repository.mark_enqueue_failed.await_args.kwargs
         self.assertEqual(kwargs["error_code"], "QUEUE_ENQUEUE_FAILED")
         self.assertEqual(kwargs["error_message"], "Analysis queue is temporarily unavailable")
         self.assertLessEqual(len(kwargs["error_message"]), 255)
         self.assertNotIn(secret, kwargs["error_message"])
         self.repository.mark_enqueued.assert_not_awaited()
+        self.assertEqual(status_log.call_count, 2)
+        self.assertEqual(status_log.call_args.kwargs["status"], "FAILED")
+        self.assertEqual(
+            status_log.call_args.kwargs["failure_reason"], "QUEUE_ENQUEUE_FAILED"
+        )
 
     def test_queue_failure_returns_503_when_compensation_is_not_applied(self):
         self.queue.enqueue.side_effect = RuntimeError("redis unavailable")
