@@ -50,6 +50,7 @@ class RedisConnectionManager:
     async def ping(self) -> None:
         """Redis 연결과 명령 처리 가능 여부 확인"""
 
+        redis: ArqRedis | None = None
         try:
             redis = await self.get_connection()
 
@@ -57,21 +58,28 @@ class RedisConnectionManager:
             await asyncio.wait_for(redis.ping(), timeout=self._timeout_seconds)
         except Exception:
             # PING 또는 연결 생성에 실패한 연결은 재사용하지 않는다
-            await self.invalidate()
+            if redis is not None:
+                await self.invalidate(redis)
             raise RedisUnavailableError("Redis is unavailable") from None
 
-    async def invalidate(self) -> None:
-        """현재 연결을 공유 상태에서 제거하고 안전하게 종료"""
+    async def invalidate(self, failed_redis: ArqRedis) -> None:
+        """실패한 연결이 현재 연결인 경우에만 공유 상태에서 제거하고 종료"""
         async with self._lock:
-            # 잠금 안에서는 공유 참조만 빠르게 제거
-            redis, self._redis = self._redis, None
-        if redis is not None:
-            try:
-                # 네트워크 종료를 기다리는 동안 연결 생성을 막지 않도록 실제 종료 작업은 잠금 밖에서 수행
-                await redis.aclose()
-            except Exception:
-                pass
+            if self._redis is not failed_redis:
+                return
+            self._redis = None
+        try:
+            # 네트워크 종료를 기다리는 동안 연결 생성을 막지 않도록 실제 종료 작업은 잠금 밖에서 수행
+            await failed_redis.aclose()
+        except Exception:
+            pass
 
     async def close(self) -> None:
         """애플리케이션 종료 시 현재 Redis 연결을 정리"""
-        await self.invalidate()
+        async with self._lock:
+            redis, self._redis = self._redis, None
+        if redis is not None:
+            try:
+                await redis.aclose()
+            except Exception:
+                pass

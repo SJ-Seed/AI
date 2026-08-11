@@ -49,6 +49,7 @@ class ManagedArqAnalysisQueue:
         self._queue_name = queue_name
 
     async def enqueue(self, analysis_id: int) -> None:
+        redis: ArqRedis | None = None
         try:
             # 기존 연결이 유효하면 재사용, 없으면 RedisConnectManager 통해 새 연결 생성
             redis = await self._connections.get_connection()
@@ -58,5 +59,6 @@ class ManagedArqAnalysisQueue:
 
         except Exception:
             # 실패한 연결을 재사용하지 않도록 폐기
-            await self._connections.invalidate()
+            if redis is not None:
+                await self._connections.invalidate(redis)
             raise RedisUnavailableError("Analysis queue is unavailable") from None
