@@ -1,0 +1,21 @@
+[Unit]
+Description=Stream SJSeed API and worker logs for CloudWatch
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+User=root
+EnvironmentFile=/etc/sjseed-monitoring/environment
+ExecStart=/usr/local/lib/sjseed-monitoring/stream-docker-logs.sh
+StandardOutput=append:/var/log/sjseed/application.log
+StandardError=append:/var/log/sjseed/application.log
+Restart=always
+RestartSec=5s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=read-only
+ProtectSystem=strict
+
+[Install]
+WantedBy=multi-user.target

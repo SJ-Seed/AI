@@ -1,0 +1,12 @@
+[Unit]
+Description=Run the SJSeed dependency health probe every minute
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=60s
+AccuracySec=5s
+Persistent=true
+Unit=sjseed-health-probe.service
+
+[Install]
+WantedBy=timers.target
