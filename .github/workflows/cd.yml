@@ -101,7 +101,27 @@ jobs:
             docker compose pull ai worker
             docker compose up -d postgres
             docker compose run --rm ai alembic upgrade head
-            docker compose up -d --no-build ai worker
+            docker compose up -d --no-build --force-recreate ai worker
+
+            expected_image_id="$(docker image inspect ghcr.io/sj-seed/ai:latest --format '{{.Id}}')"
+
+            for service in ai worker; do
+              container_id="$(docker compose ps -q "$service")"
+
+              if [ -z "$container_id" ]; then
+                echo "The $service container was not created"
+                exit 1
+              fi
+
+              actual_image_id="$(docker inspect "$container_id" --format '{{.Image}}')"
+
+              if [ "$actual_image_id" != "$expected_image_id" ]; then
+                echo "$service is not running the expected image"
+                echo "Expected: $expected_image_id"
+                echo "Actual:   $actual_image_id"
+                exit 1
+              fi
+            done
 
             health_check_succeeded=false
 
