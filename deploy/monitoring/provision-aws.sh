@@ -2,6 +2,14 @@
 # AWS 쪽 모니터링 리소스와 장애 이메일 알림을 자동으로 구성하는 스크립트
 set -euo pipefail
 
+# Prevent Git Bash/MSYS from converting AWS resource names such as
+# /sjseed/ai/docker into Windows filesystem paths.
+case "${MSYSTEM:-}" in
+  MINGW*|MSYS*)
+    export MSYS2_ARG_CONV_EXCL='*'
+    ;;
+esac
+
 AWS_REGION="${AWS_REGION:-ap-northeast-2}"
 INSTANCE_ID="${INSTANCE_ID:-}"
 ALERT_EMAIL="${ALERT_EMAIL:-}"
