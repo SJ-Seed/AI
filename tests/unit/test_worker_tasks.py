@@ -15,11 +15,13 @@ from app.infrastructure.image.image_downloader import (
     ImageDownloadResult,
 )
 from app.worker.tasks import (
+    ANALYSIS_RETENTION,
     AI_ANALYSIS_ERROR,
     IMAGE_DOWNLOAD_ERROR,
     WORKER_INTERNAL_ERROR,
     ImageDownloadFailure,
     WorkerInternalFailure,
+    cleanup_terminal_analyses,
     process_analysis,
     reconcile_pending_analyses,
     shutdown,
@@ -466,6 +468,36 @@ class ReconciliationTaskTest(unittest.TestCase):
         self.assertEqual(count, 0)
         self.repository.release_enqueue_claim.assert_awaited_once_with(11)
         self.repository.mark_enqueued.assert_not_awaited()
+
+
+class CleanupTaskTest(unittest.TestCase):
+    def setUp(self):
+        self.repository = Mock()
+        self.repository.delete_terminal_before = AsyncMock(return_value=4)
+        self.ctx = {"session_factory": SessionFactory()}
+
+    def test_deletes_jobs_older_than_twenty_four_hours_and_logs_count(self):
+        now = datetime(2026, 8, 16, 15, 30, tzinfo=timezone.utc)
+
+        with patch(
+            "app.worker.tasks.SqlAlchemyAnalysisRepository",
+            return_value=self.repository,
+        ), patch("app.worker.tasks.datetime") as datetime_type, self.assertLogs(
+            "app.worker.tasks", level="INFO"
+        ) as logs:
+            datetime_type.now.return_value = now
+            deleted_count = asyncio.run(cleanup_terminal_analyses(self.ctx))
+
+        self.assertEqual(deleted_count, 4)
+        self.repository.delete_terminal_before.assert_awaited_once_with(
+            now - ANALYSIS_RETENTION
+        )
+        self.assertIn("Cleaned up expired analysis jobs", logs.output[0])
+        self.assertEqual(logs.records[0].deleted_count, 4)
+        self.assertEqual(
+            logs.records[0].cutoff,
+            (now - ANALYSIS_RETENTION).isoformat(),
+        )
 
 
 if __name__ == "__main__":

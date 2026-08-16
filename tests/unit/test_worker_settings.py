@@ -24,6 +24,13 @@ class WorkerSettingsTest(unittest.TestCase):
         self.assertEqual(settings.max_jobs, 1)
         self.assertEqual(settings.max_tries, 5)
         self.assertTrue(settings.retry_jobs)
+        self.assertEqual(
+            [job.coroutine.__name__ for job in settings.cron_jobs],
+            ["reconcile_pending_analyses", "cleanup_terminal_analyses"],
+        )
+        cleanup_job = settings.cron_jobs[1]
+        self.assertEqual(cleanup_job.minute, 0)
+        self.assertEqual(cleanup_job.second, 0)
 
 
 if __name__ == "__main__":

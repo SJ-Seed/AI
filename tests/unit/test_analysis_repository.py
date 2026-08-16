@@ -289,6 +289,59 @@ class AnalysisRepositoryTest(unittest.TestCase):
                 self.session.commit.assert_not_awaited()
                 self.session.rollback.assert_awaited_once_with()
 
+    def test_delete_terminal_before_deletes_only_expired_terminal_analyses(self):
+        self._set_rowcounts(3)
+        cutoff = datetime(2026, 8, 15, 12, 0, tzinfo=timezone.utc)
+
+        deleted_count = asyncio.run(
+            self.repository.delete_terminal_before(cutoff)
+        )
+
+        self.assertEqual(deleted_count, 3)
+        statement = self.session.execute.await_args.args[0]
+        sql = str(statement.compile(dialect=postgresql.dialect()))
+        params = statement.compile().params
+        self.assertIn("DELETE FROM analyses", sql)
+        self.assertIn("analyses.status IN", sql)
+        self.assertIn("analyses.completed_at <=", sql)
+        self.assertIn(
+            [AnalysisStatus.COMPLETED, AnalysisStatus.FAILED],
+            params.values(),
+        )
+        self.assertIn(cutoff, params.values())
+        self.session.commit.assert_awaited_once_with()
+        self.session.rollback.assert_not_awaited()
+
+    def test_delete_terminal_before_rolls_back_on_execute_error(self):
+        error = RuntimeError("delete failed")
+        self.session.execute.side_effect = error
+
+        with self.assertRaises(RuntimeError) as raised:
+            asyncio.run(
+                self.repository.delete_terminal_before(
+                    datetime(2026, 8, 15, tzinfo=timezone.utc)
+                )
+            )
+
+        self.assertIs(raised.exception, error)
+        self.session.rollback.assert_awaited_once_with()
+        self.session.commit.assert_not_awaited()
+
+    def test_delete_terminal_before_rolls_back_on_commit_error(self):
+        self._set_rowcounts(1)
+        error = RuntimeError("commit failed")
+        self.session.commit.side_effect = error
+
+        with self.assertRaises(RuntimeError) as raised:
+            asyncio.run(
+                self.repository.delete_terminal_before(
+                    datetime(2026, 8, 15, tzinfo=timezone.utc)
+                )
+            )
+
+        self.assertIs(raised.exception, error)
+        self.session.rollback.assert_awaited_once_with()
+
     def test_execute_error_rolls_back_and_propagates(self):
         error = RuntimeError("execute failed")
         self.session.execute.side_effect = error
