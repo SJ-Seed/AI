@@ -37,6 +37,7 @@ AI_ANALYSIS_ERROR = "AI_ANALYSIS_ERROR"
 AI_AUTHENTICATION_ERROR = "AI_AUTHENTICATION_ERROR"
 WORKER_INTERNAL_ERROR = "WORKER_INTERNAL_ERROR"
 MAX_PERSISTED_ERROR_MESSAGE_LENGTH = 255
+ANALYSIS_RETENTION = timedelta(hours=24)
 
 # 실제 예외 내용 대신 DB에 저장할 안전한 고정 메시지
 SAFE_ERROR_MESSAGES = {
@@ -195,6 +196,22 @@ async def reconcile_pending_analyses(ctx: dict[str, Any]) -> int:
             )
 
     return enqueued_count
+
+
+async def cleanup_terminal_analyses(ctx: dict[str, Any]) -> int:
+    """Delete completed and failed analyses after the retention period."""
+    cutoff = datetime.now(timezone.utc) - ANALYSIS_RETENTION
+    session_factory = ctx["session_factory"]
+
+    async with session_factory() as session:
+        repository = SqlAlchemyAnalysisRepository(session)
+        deleted_count = await repository.delete_terminal_before(cutoff)
+
+    logger.info(
+        "Cleaned up expired analysis jobs",
+        extra={"deleted_count": deleted_count, "cutoff": cutoff.isoformat()},
+    )
+    return deleted_count
 
 
 async def process_analysis(ctx: dict[str, Any], analysis_id: int) -> bool:

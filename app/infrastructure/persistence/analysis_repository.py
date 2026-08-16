@@ -2,7 +2,7 @@
 
 from datetime import datetime, timezone
 
-from sqlalchemy import and_, func, or_, select, update
+from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.ports.analysis_repository import AnalysisRepository
@@ -190,6 +190,20 @@ class SqlAlchemyAnalysisRepository(AnalysisRepository):
             .values(enqueue_claimed_at=None)
         )
         return await self._execute_transition(statement)
+
+    async def delete_terminal_before(self, cutoff: datetime) -> int:
+        """Delete terminal analyses whose completion timestamp reached the cutoff."""
+        statement = delete(Analysis).where(
+            Analysis.status.in_((AnalysisStatus.COMPLETED, AnalysisStatus.FAILED)),
+            Analysis.completed_at <= cutoff,
+        )
+        try:
+            result = await self.session.execute(statement)
+            await self.session.commit()
+            return int(result.rowcount)
+        except Exception:
+            await self.session.rollback()
+            raise
 
     # 분석이 성공적으로 완료되었을 때 결과 저장
     async def mark_completed(

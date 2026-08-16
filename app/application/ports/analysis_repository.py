@@ -65,6 +65,10 @@ class AnalysisRepository(Protocol):
         """Release a reconciliation claim after an enqueue error."""
         ...
 
+    async def delete_terminal_before(self, cutoff: datetime) -> int:
+        """Delete completed or failed analyses completed at or before cutoff."""
+        ...
+
     # 분석이 정상적으로 끝났을 떄 결과를 저장하고 COMPLETED 상태로 변경
     async def mark_completed(
         self,
