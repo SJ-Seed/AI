@@ -18,14 +18,21 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    op.create_index(
-        "ix_analyses_terminal_completed_at",
-        "analyses",
-        ["completed_at"],
-        unique=False,
-        postgresql_where=sa.text("status IN ('COMPLETED', 'FAILED')"),
-    )
+    with op.get_context().autocommit_block():
+        op.create_index(
+            "ix_analyses_terminal_completed_at",
+            "analyses",
+            ["completed_at"],
+            unique=False,
+            postgresql_where=sa.text("status IN ('COMPLETED', 'FAILED')"),
+            postgresql_concurrently=True,
+        )
 
 
 def downgrade() -> None:
-    op.drop_index("ix_analyses_terminal_completed_at", table_name="analyses")
+    with op.get_context().autocommit_block():
+        op.drop_index(
+            "ix_analyses_terminal_completed_at",
+            table_name="analyses",
+            postgresql_concurrently=True,
+        )
